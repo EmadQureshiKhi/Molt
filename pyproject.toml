@@ -1,0 +1,208 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "molt"
+version = "0.1.0"
+description = "Durable, distributed, governable memory for AI coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+
+# Every direct dependency is pinned to an exact version so that a developer
+# machine and the workflow resolve the same tree.
+dependencies = [
+  "psycopg[binary]==3.3.4",
+  "boto3==1.43.72",
+  "starlette==1.6.0",
+  "uvicorn==0.52.3",
+  "jinja2==3.1.6",
+  "cryptography==50.0.0",
+]
+
+[project.optional-dependencies]
+# Verification and static-analysis tooling, pinned exactly for the same reason.
+dev = [
+  "hypothesis==6.165.9",
+  "pytest==9.1.1",
+  # Parallel execution for the instance-backed suites. Each worker runs against a
+  # database of its own, because creating a schema modifies the descriptor of the
+  # database holding it and workers sharing one database contend on that single row.
+  "pytest-xdist==3.6.1",
+  "mypy==2.3.1",
+  "ruff==0.16.3",
+  # The document parser the workflow-definition test reads the workflow with,
+  # so that test asserts over a parsed structure rather than over the text.
+  "ruamel.yaml==0.19.1",
+]
+
+[project.scripts]
+molt = "molt.cli:main"
+molt-hook = "molt.capture.hook:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+molt = ["store/migrations/*.sql"]
+[tool.pytest.ini_options]
+# The suites live under tests/ and the package is importable from src/ without
+# an install step, so a checkout runs the credential-free suites immediately.
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# Strict marker and strict configuration enforcement: an undeclared marker or an
+# unrecognised configuration key is an error rather than a warning, so the
+# marking discipline the workflow relies on cannot silently rot.
+addopts = "--strict-markers --strict-config"
+
+# Every marker the suites use is declared here. Four of them name a suite that is
+# instance-backed by definition and `instance` states that prerequisite on its own,
+# so the five gate on a reachable local instance; `services` gates on cloud and
+# model provider credentials; and the rest need neither, which is what lets the
+# workflow run the unit, property, quality, and specification suites with no
+# credential. What a test measures and what a test needs are kept apart: `perf`
+# says a bound is being measured and carries no prerequisite of its own, so a
+# benchmark of in-process work runs on a bare checkout while a benchmark of a
+# cluster's own work carries `instance` beside it and skips when none is reachable.
+markers = [
+  "integration: needs a reachable CockroachDB instance",
+  "services: needs cloud and model provider credentials",
+  "e2e: end-to-end sequence against a reachable CockroachDB instance",
+  "instance: needs a reachable CockroachDB instance, stated on its own for a test whose suite marker does not imply one",
+  "perf: measures a latency or throughput bound, against a reachable instance only when marked `instance` too",
+  "concurrency: drives concurrent workers against a reachable instance",
+  "skills: loads and executes an agent skill definition against a seeded instance",
+  "mcp: exercises the tool registry and the server transports",
+  "quality: static type, lint, and format gates over the tracked source",
+  "spec: interface specification parsing and coverage assertions",
+]
+
+# --------------------------------------------------------------------------
+# Strict static type check.
+#
+# The three checked paths are the source package, the test suites, and the
+# repository scripts. Strictness is what makes the annotation obligation
+# machine-verified rather than conventional: an untyped or partially typed
+# definition, an implicit dynamic return, and an import the checker cannot
+# follow are each an error rather than a silent gap. There is no per-module
+# relaxation here on purpose; a directive that silences the checker must be
+# justified in the ignore allowlist instead.
+# --------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+mypy_path = ["src"]
+files = ["src/molt", "tests", "scripts"]
+namespace_packages = true
+explicit_package_bases = true
+
+strict = true
+
+# Untyped and partially typed definitions are rejected.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+check_untyped_defs = true
+
+# Dynamic typing is rejected where it would erase a declared shape.
+disallow_any_generics = true
+disallow_any_unimported = true
+disallow_subclassing_any = true
+warn_return_any = true
+
+# Imports must be followed. An import the checker cannot resolve is an error,
+# and a module without declared types is not silently treated as dynamic.
+ignore_missing_imports = false
+follow_imports = "normal"
+follow_untyped_imports = false
+
+# Remaining strictness and hygiene of the configuration itself.
+strict_optional = true
+strict_equality = true
+extra_checks = true
+implicit_reexport = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+warn_unused_configs = true
+pretty = true
+show_error_codes = true
+
+# --------------------------------------------------------------------------
+# Linter and formatter.
+#
+# One tool fills both roles, pinned to one exact version, so the formatter and
+# the linter cannot disagree about the same line and the check reproduces on a
+# developer machine and in the workflow. The checked paths are the source
+# package, the test suites, the repository scripts, and the infrastructure
+# directory; the paths are passed on the command line so the scope is explicit
+# at the call site, and the exclusions below keep an argument-free invocation
+# away from ignored material.
+# --------------------------------------------------------------------------
+[tool.ruff]
+required-version = "==0.16.3"
+target-version = "py311"
+line-length = 100
+src = ["src", "tests", "scripts"]
+respect-gitignore = true
+extend-exclude = [
+  "reference",
+  ".reference",
+  ".secrets",
+  ".venv",
+  "build",
+  "dist",
+]
+
+[tool.ruff.lint]
+select = [
+  "A",    # shadowing of a builtin
+  "ANN",  # missing annotation on a parameter or a return
+  "ARG",  # unused argument
+  "B",    # likely bug
+  "C4",   # comprehension clarity
+  "DTZ",  # naive datetime
+  "E",    # style error
+  "F",    # logical error
+  "I",    # import ordering
+  "ISC",  # implicit string concatenation
+  "N",    # naming convention
+  "PIE",  # redundant construct
+  "PT",   # test style
+  "PTH",  # filesystem path handling
+  "RET",  # return-statement clarity
+  "RUF",  # linter-specific checks
+  "S",    # security-sensitive construct
+  "SIM",  # simplifiable construct
+  "TID",  # import tidiness
+  "UP",   # outdated syntax for the declared floor
+  "W",    # style warning
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Assertions are the point of a test module, and a property assertion often
+# states one conjoined invariant that reads worse split apart.
+"tests/**/*.py" = ["S101", "PT018"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["molt"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+skip-magic-trailing-comma = false
+docstring-code-format = true
