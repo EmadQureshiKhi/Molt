@@ -1,0 +1,51 @@
+# Reading material kept locally and never placed under version control, under
+# either the plain or the hidden directory name.
+reference/
+.reference/
+
+# Operator credential files resolved at runtime; no value belongs in the tree.
+.secrets/
+
+# The residue ground-truth mapping is deliberately stored outside the cluster
+# and outside version control, so a detector cannot pass by reading the answer.
+seed/ground_truth.json
+
+# Local capture spool
+*.spool
+.molt/
+spool/
+
+# Build artefacts
+build/
+dist/
+*.egg-info/
+*.egg
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Submission copy written for an external form. It carries calendar dates and
+# third-party product names by necessity, which the metadata-hygiene gate
+# rejects in a tracked file, so it stays outside version control.
+submission/
+
+# Diagram working directory: the layout generator and anything it leaves behind.
+# The rendered diagram it produces is a tracked deliverable under assets/, which
+# is what the README and the documentation reference.
+diagram/
+
+# Editor and platform noise
+.DS_Store
