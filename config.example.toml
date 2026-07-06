@@ -1,0 +1,248 @@
+# Example configuration. Copy to config.toml and replace each placeholder.
+#
+# Resolution order for every key is: environment variable, then this file, then
+# the built-in default. The environment variable wins.
+#
+# No secret value belongs in this file and no secret has a default. Secrets
+# resolve only from a parameter store, from an operator-provided credential
+# file, or from an environment variable the deployment injects. The keys below
+# that end in _param or _file name where a secret lives; they hold no secret.
+#
+# Three values have no configuration-file key at all and are accepted only from
+# the environment, so that a bearer token, an ingress signing secret, and a
+# direct connection string cannot be committed:
+#   MOLT_COLLECTOR_TOKEN   capture side only
+#   MOLT_INGRESS_SECRET    capture side only
+#   MOLT_DSN               local development and tests only
+
+[collector]
+# Base address the capture surfaces post to.
+url = "https://collector.example.invalid"
+# Parameter name holding the expected bearer token.
+token_param = "/molt/collector/token"
+# Maximum accepted request body in bytes.
+max_body_bytes = 5242880
+# Ceiling on concurrent ingest executions, so a leaked token has bounded cost.
+reserved_concurrency = 10
+# Parameter name holding the shared secret the ingress signature is keyed with.
+ingress_secret_param = "/molt/collector/ingress-secret"
+# Requests older than this many seconds are refused, bounding replay.
+ingress_max_age_seconds = 300
+
+[store]
+# Parameter name holding the connection string for the selected role.
+dsn_param = "/molt/store/dsn"
+# Least-privileged role this process connects with.
+role = "writer"
+# Parameter name holding the read-only role's own connection string. Needed only by a
+# component that holds a wider role and must still perform one analysis under no write
+# privilege at all: the Web_Console holds the eraser role so that the erasure console
+# can run erasures, while the Sensitivity_Analyzer refuses any role that can write.
+# Leave unset in a process whose own role is already read-only.
+reader_dsn_param = "/molt/store/dsn/reader"
+# Server-side statement timeout in milliseconds.
+statement_timeout_ms = 10000
+# Retries attempted on a serialisation failure.
+max_retries = 5
+
+[capture]
+# Path to the workspace-to-tenant mapping file.
+client_map = "./client-map.example.toml"
+# Directory holding the bounded retry spool.
+spool_dir = "~/.molt/spool"
+# Spool size bound in bytes; the oldest entries are discarded beyond it.
+spool_max_bytes = 67108864
+# Timeout applied to every network operation, in seconds.
+http_timeout_seconds = 5
+# Retry attempts per failed transmission.
+http_retries = 3
+# Soft wall-clock budget per hook invocation, in milliseconds.
+soft_deadline_ms = 1200
+# Stable identifier for this machine; empty means derive one from the host.
+machine_id = ""
+# Team the sessions from this machine are attributed to.
+team_id = "platform"
+
+[redaction]
+# Setting this true passes payloads through unmodified and logs a warning.
+disabled = false
+# Maximum recursion depth applied to nested mappings and sequences.
+max_depth = 32
+# Additional key names whose values are treated as sensitive; these extend the
+# built-in set rather than replacing it.
+sensitive_names = ["api_key", "authorization", "password", "secret", "token"]
+
+[providers]
+# Registry name of the embedding implementation to construct.
+embedding = "bedrock"
+# Registry name of the text implementation to construct.
+text = "bedrock"
+# Parameter name holding the embedding provider credential.
+embedding_credential_param = "/molt/providers/embedding-credential"
+# Parameter name holding the text provider credential.
+text_credential_param = "/molt/providers/text-credential"
+# Operator-provided file holding the embedding provider credential, used when
+# no parameter name is configured.
+embedding_credential_file = ".secrets/embedding_credential"
+# Operator-provided file holding the text provider credential, used when no
+# parameter name is configured.
+text_credential_file = ".secrets/text_credential"
+# Identifier of the code-specialised retrieval model used for embeddings.
+embedding_model_id = "REPLACE_WITH_EMBEDDING_MODEL_ID"
+# Vector width the schema fixes. This is a startup gate, not a widenable knob.
+embedding_dimensions = 1024
+# Texts per embedding call.
+embedding_batch_size = 25
+# Identifier of the text model that decides borderline residue candidates.
+adjudication_model_id = "REPLACE_WITH_ADJUDICATION_MODEL_ID"
+# Identifier of the text model that performs surgical rewriting.
+rewrite_model_id = "REPLACE_WITH_REWRITE_MODEL_ID"
+# Retry attempts per failed model call.
+max_retries = 3
+# Timeout applied to every model call, in seconds.
+timeout_seconds = 30
+# Region the default provider implementations call in.
+bedrock_region = "REPLACE_WITH_DEPLOYMENT_REGION"
+# One of auto, true, or false. auto follows the text provider's own reported
+# prompt-cache capability.
+prompt_cache_enabled = "auto"
+
+[erasure]
+# Byte budget for the query excerpt carried inside the stable prompt prefix.
+prefix_budget_bytes = 32768
+# Least stable-prefix length at which a cache boundary is marked. A prefix
+# shorter than this is deliberately left unmarked, because a cache write with no
+# subsequent cache read costs more than no caching.
+minimum_cacheable_prefix_bytes = 16384
+# Cosine distance at or below which a residue candidate is included outright.
+auto_include_threshold = 0.20
+# Cosine distance at or below which a residue candidate is adjudicated.
+review_threshold = 0.45
+# Number of query artifacts drawn from the explicit candidate set.
+residue_query_limit = 50
+# Neighbours requested per residue query.
+residue_top_k = 100
+# Artifacts mutated per erasure batch.
+batch_size = 100
+# A rewrite whose length falls below this fraction of the original is refused.
+rewrite_ratio_min = 0.3
+# A rewrite whose length rises above this multiple of the original is refused.
+rewrite_length_ratio_max = 2.0
+# Seconds a lease grant or renewal extends the expiry by.
+lease_interval_seconds = 30
+# Owner identifier recorded on the lease; empty means derive one from the host
+# and the process.
+lease_owner = ""
+# Worker count the contention exercise starts, with a floor of ten.
+contend_workers = 10
+
+[sensitivity]
+# Grid rows: candidate auto-inclusion thresholds to evaluate.
+auto_include_thresholds = [0.10, 0.15, 0.20, 0.25, 0.30]
+# Grid columns: candidate review thresholds to evaluate.
+review_thresholds = [0.35, 0.40, 0.45, 0.50, 0.55]
+# Path to the planted-fragment mapping used for the recovered-fragment column.
+ground_truth_path = "seed/ground_truth.json"
+
+[procedures]
+# Confidence a learned procedure is written with.
+confidence_initial = 0.5
+# Amount a succeeded outcome raises confidence by.
+success_delta = 0.05
+# Amount a failed outcome lowers confidence by.
+failure_delta = 0.10
+# Recall excludes procedures whose confidence falls below this floor; erasure
+# still reaches them.
+recall_floor = 0.15
+
+[checkpoint]
+# Window covered by one signed checkpoint, and the scheduled period, in seconds.
+interval_seconds = 3600
+
+[retention]
+# Row-level expiry interval applied to the disposable working tier, in seconds.
+working_ttl_seconds = 3600
+# Retention interval applied where a jurisdiction names no other.
+default_interval = "90 days"
+
+[console]
+# Tracked machine-readable interface document the console serves.
+interface_spec_path = "docs/interface.json"
+# Address the local development server binds; the deployed console is invoked
+# through its function endpoint instead.
+bind = "127.0.0.1:8080"
+# Setting this true relaxes the console to read-only demonstration behaviour.
+demo_mode = false
+# Parameter name holding the console access credential.
+credential_param = "/molt/console/credential"
+# Parameter name holding the console session signing key.
+session_key_param = "/molt/console/session-key"
+
+[certificate]
+# Identifier of the asymmetric signing key.
+kms_key_id = "REPLACE_WITH_SIGNING_KEY_ID"
+# Signing algorithm requested for every certificate.
+signing_algorithm = "ECDSA_SHA_256"
+# Object storage bucket certificates are written to.
+bucket = "REPLACE_WITH_CERTIFICATE_BUCKET"
+# Key prefix within that bucket.
+prefix = "certificates/"
+# Whole days of Object Lock retention applied in governance mode, short so that
+# teardown can release retention without manual intervention.
+object_lock_days = 1
+# Path to a saved copy of the signing key's public half. Set this and a verification
+# calls no key service at all, which is how an auditor with no account on the signing
+# party's cloud checks a certificate independently. Leave unset inside a deployment
+# that can reach the key service.
+# public_key_path = "./certificate-public-key.der"
+
+[ccloud]
+# Cluster control-plane command name or path.
+binary = "ccloud"
+# Identifier of the cluster this deployment targets.
+cluster_id = "REPLACE_WITH_CLUSTER_ID"
+
+[backup]
+# Operator-owned target a pre-erasure backup is written into. There is no default:
+# a backup belongs where the operator chose and nowhere else.
+target = "REPLACE_WITH_BACKUP_TARGET_URI"
+# Time a pre-erasure backup is allowed to take, in seconds.
+timeout_seconds = 600
+
+[watcher]
+# One of auto, changefeed, or polling.
+mode = "auto"
+# Interval between polls when the polling fallback is in use, in seconds.
+poll_interval_seconds = 2
+# Resolved-timestamp interval requested from the change stream.
+resolved_interval = "2s"
+# Path to the policy rule set; empty means use the built-in rules.
+rules_path = ""
+# Additional paths treated as sensitive; these extend the built-in set.
+sensitive_paths = ["/etc/", "~/.ssh/", ".env"]
+
+[mcp]
+# One of stdio or http.
+transport = "stdio"
+# Address the http transport binds.
+bind = "0.0.0.0:8090"
+# Tenant slugs this server may answer for, resolved at startup and never from a
+# tool argument.
+permitted_clients = ["REPLACE_WITH_TENANT_SLUG"]
+# Upper bound on rows returned by any single tool call.
+max_results = 50
+
+[telemetry]
+# Namespace published metrics are grouped under.
+namespace = "Molt"
+# Ceiling on distinct billable metric-and-dimension combinations; further
+# combinations are emitted as structured log records instead.
+metric_cardinality_max = 10
+# How many metric data items travel in one put to the metrics service.
+metric_batch_size = 20
+# How often buffered measurements are handed to the metrics service, in seconds.
+metric_delivery_interval_seconds = 60
+# One of debug, info, warning, or error.
+log_level = "info"
+# Setting this true suppresses emission, for local tests.
+disabled = false
