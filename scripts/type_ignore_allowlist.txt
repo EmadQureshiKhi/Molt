@@ -1,0 +1,25 @@
+# Allowlist of type-check ignore directives.
+#
+# The gate beside this file is bidirectional. A directive found in tracked
+# source that no entry here names is a failure, and an entry here that names a
+# directive the source no longer carries is equally a failure. Both directions
+# matter: the first keeps a silenced type error from passing unnoticed, and the
+# second keeps this file from accumulating exemptions that protect nothing.
+#
+# Format: one entry per line, three columns separated by a vertical bar.
+#
+#   <path relative to the repository root> | <exact directive> | <reason>
+#
+#   Column 1  the file the directive appears in, with forward slashes.
+#   Column 2  the directive exactly as the gate reports it, including any
+#             bracketed error-code list, with whitespace runs collapsed to one
+#             space. Running the gate prints the reportable spelling.
+#   Column 3  why the directive is there: what the checker cannot express and
+#             what makes suppressing it correct rather than convenient.
+#
+# Blank lines and lines beginning with a hash are ignored. A line carrying
+# other than three columns, or carrying an empty column, is malformed and the
+# gate exits with status 2 naming the line.
+#
+# The list is deliberately empty. Add an entry in the same change that adds the
+# directive it justifies, and remove the entry in the change that removes it.
