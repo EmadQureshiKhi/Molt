@@ -1,0 +1,36 @@
+# Forbidden tokens for the two token-driven hygiene pattern classes.
+#
+# THIS FILE IS EXCLUDED FROM THE SCAN IT DRIVES. A denylist necessarily holds
+# the very tokens it forbids, so scanning it would report every entry below as
+# a finding. It is the only path the gate excludes from its own scan, and the
+# gate names it explicitly rather than inferring the exclusion.
+#
+# Format: a section header in square brackets, then one token per line. Blank
+# lines and lines beginning with a number sign are ignored. Tokens are matched
+# case-insensitively at alphanumeric boundaries, so a token never matches
+# inside a longer word. The two permitted sections are the two below; any other
+# section header, any entry before the first section header, any duplicate
+# entry, and any entry holding a control character make the file malformed and
+# the gate exits 2 rather than reporting a clean scan.
+#
+# A token that a naming obligation forces the documentation to state belongs in
+# the permitted-term file instead, not here.
+
+[personal-name]
+# Personal and account names that must never reach a comment, a docstring, or a
+# documentation file. Shape recognition cannot find these, which is why they
+# are enumerated.
+nokitha
+johndoe
+janedoe
+jdoe
+johnsmith
+
+[reference-project]
+# Identifiers of the reading material studied during the build. The material
+# itself is held outside version control and is read by nothing the repository
+# ships, and no identifier of it may appear in any tracked file.
+reme
+agent-trace
+agent_trace
+agentstrace

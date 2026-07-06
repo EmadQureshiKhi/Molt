@@ -1,0 +1,87 @@
+# Permitted terms for the metadata-hygiene gate.
+#
+# The requirements oblige the documentation to name the database product and
+# its tooling, the cloud provider and each service used, and each supported
+# agent command-line tool. A match falling wholly inside one of the terms below
+# is therefore not a finding.
+#
+# Format: a section header in square brackets, then one term per line. Blank
+# lines and lines beginning with a number sign are ignored. Terms are matched
+# case-insensitively at alphanumeric boundaries. The four permitted sections
+# are the four below; any other section header, any entry before the first
+# section header, any duplicate entry, and any entry holding a control
+# character make the file malformed and the gate exits 2 rather than reporting
+# a clean scan.
+
+[database]
+# The database product and its tooling.
+CockroachDB
+CockroachDB Cloud
+Cockroach Labs
+cockroachlabs
+cockroachlabs.cloud
+cockroach
+crdb
+ccloud
+ccloud CLI
+
+[cloud]
+# The cloud provider and every service named in the delivered configuration,
+# followed by the two external model services the delivered configuration
+# selects.
+AWS
+Amazon
+Amazon Web Services
+Bedrock
+Amazon Bedrock
+KMS
+AWS Key Management Service
+S3
+Amazon S3
+Parameter Store
+Systems Manager
+AWS Systems Manager Parameter Store
+Lambda
+AWS Lambda
+Fargate
+Amazon ECS Fargate
+ECS
+CloudFront
+Amazon CloudFront
+CloudWatch
+Amazon CloudWatch
+CloudFormation
+AWS CloudFormation
+IAM
+Voyage AI
+Voyage
+Anthropic
+
+[agent-cli]
+# The five supported agent command-line tools.
+Claude Code
+Claude
+Cursor
+Codex
+Gemini CLI
+Gemini
+Copilot
+GitHub Copilot
+
+[tooling]
+# Build and runtime tooling the manifest and the setup instructions are
+# obliged to name.
+Python
+psycopg
+boto3
+starlette
+uvicorn
+jinja2
+cryptography
+hypothesis
+pytest
+mypy
+ruff
+OpenAPI
+GitHub
+GitHub Actions
