@@ -1,0 +1,96 @@
+name: checks
+
+# The workflow reads the repository's own contents and runs the checks a
+# reviewer would run on a developer machine. Every step is a read of tracked
+# files or a run of a test suite that needs no reachable database instance, no
+# cloud account, and no model provider, so a reviewer holding nothing can run
+# the whole workflow. No step writes anything back to the repository.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Read access to the repository contents is the only permission any step needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    name: static analysis, metadata hygiene, and the self-contained suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: check out the repository
+        uses: actions/checkout@v5
+
+      # The interpreter is pinned above the declared floor and is invoked as
+      # python3.12 by every step below, so the workflow and the documented
+      # developer commands are the same invocation.
+      - name: select the interpreter
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Tooling is installed from the pinned manifest rather than from latest,
+      # so the checks below resolve the same versions a developer machine
+      # resolves. The package itself needs no install step: the type checker
+      # and the test runner both read the source path from the manifest.
+      - name: install the pinned tooling
+        run: |
+          python3.12 -m pip install --disable-pip-version-check --upgrade pip
+          python3.12 -m pip install --disable-pip-version-check -r requirements.txt
+
+      # Step 1 of 6. The strict type check. The checked path set is declared in
+      # the manifest and covers the source package, the test suites, and the
+      # repository scripts. Any reported error fails the step.
+      - name: step 1, strict type check
+        run: python3.12 -m mypy
+
+      # Step 2 of 6. The type-ignore allowlist gate. A directive the allowlist
+      # names no entry for fails the step, and so does an allowlist entry
+      # naming a directive that no longer exists.
+      - name: step 2, type-ignore allowlist check
+        run: python3.12 scripts/check_type_ignores.py
+
+      # Step 3 of 6. The linter over the four checked paths. Any violation
+      # fails the step.
+      - name: step 3, linter check
+        run: python3.12 -m ruff check src/molt tests scripts infra
+
+      # Step 4 of 6. The formatter over the same four paths, in check mode, so
+      # a file that would be reformatted fails the step and no file is
+      # rewritten.
+      - name: step 4, formatter check
+        run: python3.12 -m ruff format --check src/molt tests scripts infra
+
+      # Step 5 of 6. The metadata-hygiene gate over tracked source and
+      # documentation. Any prohibited pattern fails the step.
+      - name: step 5, metadata-hygiene check
+        run: python3.12 scripts/hygiene.py
+
+      # Step 6 of 6, first half. The unit suite. The database-backed, service,
+      # concurrency, end-to-end, and performance suites are deselected by
+      # marker, which is what lets the run proceed with no reachable database
+      # instance, no cloud account, and no model provider.
+      - name: step 6, unit suite
+        run: >-
+          python3.12 -m pytest tests/unit
+          -m "not integration and not services and not concurrency and not e2e and not perf"
+
+      # Step 6 of 6, second half. The property suite, run after the unit suite
+      # so a cheap failure surfaces before the generative run, under the same
+      # marker deselection.
+      - name: step 6, property suite
+        run: >-
+          python3.12 -m pytest tests/property
+          -m "not integration and not services and not concurrency and not e2e and not perf"
