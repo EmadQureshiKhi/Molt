@@ -1,0 +1,83 @@
+-- The three references an authorised erasure has to be able to cut, and the one it
+-- does not.
+--
+-- Removing a tenant's Sessions and the Events recorded in them is a governed
+-- operation with a request, a lease, a candidate set, a disposition per artifact,
+-- and a signed certificate behind it. Three of the references the core migration
+-- declared stand between that operation and the rows it was authorised to remove,
+-- and they stand there in a shape no delete order can satisfy.
+--
+-- A sub-agent Session names the Event of its parent Session that spawned it, and
+-- every Event names the Session it was recorded in. The Event may not go before the
+-- Session and the Session may not go before its own Events, so the pair is a cycle
+-- for deletion and one of the two references has to give. The two self-references
+-- are the same problem drawn inside a single table: a parent Session and a child
+-- Session, or a tool call and the result answering it, are removed by one
+-- authorised operation, and neither half of such a pair may be required to outlive
+-- the other or to be found in the same batch as it.
+--
+-- Dropping the enforcement rather than the columns is the decision, and it is the
+-- decision this schema has already taken twice for the same reason. A checkpoint's
+-- covered session identifier carries no reference of any kind, and a disposition's
+-- artifact identifier carries none either: a reference that would either refuse the
+-- erasure or vanish along with it defeats the record it was meant to protect
+-- (Requirement 46.4). A reference standing between an authorised erasure and its own
+-- subject is that same reference under another name, so it gets the same answer.
+--
+-- No lineage becomes unreadable. Every dropped column stays and keeps the value it
+-- holds, the index over each of them stays, and the derivation graph is carried
+-- independently in `lineage_edge`, which is where a reader follows provenance from
+-- in any case. What goes is the cluster's refusal, not the record.
+--
+-- `ledger.session_id` stays enforced, and saying why is the point of keeping it. It
+-- is the reference that forbids an orphan Event, since an Event belonging to a
+-- Session that does not exist records nothing that can be read, and it sits in no
+-- cycle: no Session is ever required to outlive an Event through it. It is
+-- satisfiable by ordering alone, and the disposition phase now orders for it -- the
+-- hard delete sorts its decisions so that every Event is removed in an earlier
+-- batch than, or the same batch as, any Session. That is what makes this the one
+-- reference of the four that costs nothing to keep.
+--
+-- Two notes on shape, both following the protection migration rather than chosen
+-- here.
+--
+-- Every statement asks for a transaction of its own. A guarded drop naming a
+-- constraint an earlier application of this file already removed is checked against
+-- state that transaction has not yet been shown, so marking the statements is what
+-- makes the file re-runnable rather than re-runnable once. The runner writes this
+-- file's history row only after every marked statement has succeeded, so an
+-- interrupted application is re-applied whole.
+--
+-- The spawning reference is named by both spellings it may carry: the name the core
+-- migration gave it explicitly, and the name the platform generates for an inline
+-- declaration on that column. Naming both means this file removes the reference
+-- whichever way it was created, and the committed state is the same either way.
+
+-- The spawning reference, which is the cycle's first half. A sub-agent Session
+-- names an Event of the Session that spawned it, so an erasure removing both cannot
+-- order them: the Event is a dependent of the Session through `ledger.session_id`
+-- and the Session is a dependent of the Event through this one. Nulling the column
+-- first is not available either, because the role migration installs an update
+-- guard that refuses any write to it.
+--
+-- molt:own-transaction
+ALTER TABLE session
+    DROP CONSTRAINT IF EXISTS session_spawning_event_fk,
+    DROP CONSTRAINT IF EXISTS session_spawning_event_id_fkey;
+
+-- The parent Session reference. A tenant's Session tree is removed whole, and a
+-- batch boundary cuts across it wherever the candidate ordering happens to put the
+-- parent, so requiring a child to be removed alongside or before its parent is a
+-- requirement no batching can honour. The column and the index over it stay, so the
+-- tree remains walkable for every Session that still exists.
+--
+-- molt:own-transaction
+ALTER TABLE session DROP CONSTRAINT IF EXISTS session_parent_session_id_fkey;
+
+-- The answering Event reference. A result names the call it answers through this
+-- column, and the call and its result belong to one Session and leave together, so
+-- the same batch-boundary argument applies unchanged. The column stays and so does
+-- the index that makes an answer findable from its call.
+--
+-- molt:own-transaction
+ALTER TABLE ledger DROP CONSTRAINT IF EXISTS ledger_parent_event_id_fkey;

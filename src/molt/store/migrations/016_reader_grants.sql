@@ -1,0 +1,50 @@
+-- The two reads the read-only role performs and was never granted.
+--
+-- The roles migration listed the tables the read-only paths were known to read at
+-- the time, and the grants migration added the tables the second generation
+-- created. Two tables that read-only code genuinely reads fell between them, so
+-- the reader holds SELECT on neither and both paths fail on a missing privilege
+-- rather than on anything to do with what they were asked to do. This file grants
+-- exactly those two reads and nothing else.
+--
+-- The first is the candidate set of an erasure run. The residue walk reads it
+-- twice: once to take the run's longest text-bearing artifacts as the material it
+-- adjudicates, and once to establish that a finding it is about to record names an
+-- artifact the explicit pass did not already claim. That walk refuses to run under
+-- any role but the read-only one -- deliberately, because a scan looking for
+-- content that survived an erasure must not be able to change anything while it
+-- looks -- so the missing grant is not a shortfall the caller can work around by
+-- connecting differently. Without it the sensitivity analyser cannot run at all in
+-- a deployment configured as intended, and neither can the memory-protocol
+-- server's residue tool. The roles migration's own prose names the sensitivity
+-- analyser as a consumer of this role, so the omission is an oversight in the
+-- grant list rather than a decision that file recorded.
+--
+-- The second is the per-run, per-session record an erasure leaves behind. The
+-- independent certificate verifier reaches it while checking that a certificate's
+-- named checkpoint is accounted for: the query that asks which runs account for a
+-- change to one session has a second arm for the deletion case, where the ledger
+-- row is gone and nothing joins to it, and that arm is a join against this table.
+-- A verifier is by definition a third party that mutates nothing, and it connects
+-- with the read-only role for that reason, so this read is reachable only with the
+-- grant below. Its absence makes every certificate naming a checkpoint
+-- unverifiable, which is the one thing a certificate exists to be.
+--
+-- SELECT and nothing further, on both tables. The point of this role is that it
+-- cannot write, and a grant of INSERT, UPDATE, or DELETE here would undo the
+-- guarantee the two paths above rest on rather than merely widen it. The record of
+-- an erasure is also evidence, and evidence a reader could edit would be worth as
+-- little as a certificate a reader could sign.
+--
+-- No guard is needed for re-runnability. A repeated GRANT on this platform is
+-- re-issuable with no effect the second time, so applying this file twice leaves
+-- the same privileges the first application left. That is stated here rather than
+-- left to a reader to infer from the absence of a guard.
+--
+-- Nothing above this file is edited to say this. The runner records a digest per
+-- applied file and refuses to run when a recorded digest no longer matches, so
+-- folding these two grants back into the migration whose list they belong to would
+-- break every database that has already applied it. A later file adding the
+-- missing privilege is the only shape available.
+
+GRANT SELECT ON TABLE erasure_candidate, run_session TO molt_reader;
