@@ -1,0 +1,120 @@
+{#
+  The residue search: a read-only form and a results table.
+
+  Every control is a native element with a label bound by `for`, the Client picker is
+  a native select, and both thresholds are native number inputs with their step and
+  bounds declared so the browser's own validation applies. The results table carries a
+  caption and a scope on every header cell, because a table read by a screen reader
+  needs to know which header describes which cell.
+
+  Nothing on this page mutates anything: there is no form method other than get.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <p>
+    This search runs the Residue_Detector's own walk with recording suppressed. It
+    reads the corpus and writes nothing at all: no candidate row, no finding row, and
+    no disposition.
+  </p>
+
+  <form method="get" action="/residue" class="stack">
+    <div class="field">
+      <label for="residue-client">Client</label>
+      <select id="residue-client" name="{{ client_field }}">
+        <option value="">Choose a Client</option>
+        {% for row in view.clients %}
+          <option
+            value="{{ row.slug }}"
+            {% if row.slug == view.selected_client %}selected{% endif %}
+          >{{ row.display_name }} ({{ row.slug }})</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="residue-auto-include">Auto-inclusion threshold</label>
+      <input
+        type="number"
+        id="residue-auto-include"
+        name="{{ auto_include_field }}"
+        min="0"
+        max="2"
+        step="0.01"
+        value="{{ view.policy.auto_include_threshold }}"
+      />
+    </div>
+
+    <div class="field">
+      <label for="residue-review">Review threshold</label>
+      <input
+        type="number"
+        id="residue-review"
+        name="{{ review_field }}"
+        min="0"
+        max="2"
+        step="0.01"
+        value="{{ view.policy.review_threshold }}"
+      />
+    </div>
+
+    <div class="field">
+      <label for="residue-run">Recorded run identifier</label>
+      <input
+        type="text"
+        id="residue-run"
+        name="{{ run_field }}"
+        value="{{ view.run_text }}"
+        aria-describedby="residue-run-help"
+      />
+      <p id="residue-run-help">
+        Optional. The walk reads the candidate set of a recorded run. Left empty, it
+        searches under an identifier that names no stored run, so it finds the
+        candidate set of nothing and reports none.
+      </p>
+    </div>
+
+    <button type="submit">Search for residue</button>
+  </form>
+
+  {% if view.refusal %}
+    <p role="status">No search ran: {{ view.refusal }}.</p>
+  {% endif %}
+
+  {% if view.searched %}
+    <p role="status">
+      {{ view.candidate_count }} candidates, {{ view.included_count }} of them included.
+      This search recorded nothing.
+    </p>
+
+    <table>
+      <caption>
+        Residue candidates for {{ view.selected_client }}, by cosine distance ascending
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Artifact</th>
+          <th scope="col">Kind</th>
+          <th scope="col">Cosine distance</th>
+          <th scope="col">Band</th>
+          <th scope="col">Standing</th>
+          <th scope="col">Adjudicated</th>
+          <th scope="col">Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for finding in view.findings %}
+          <tr>
+            <th scope="row">{{ finding.artifact_id }}</th>
+            <td>{{ finding.artifact_kind }}</td>
+            <td>{{ finding.cosine_distance }}</td>
+            <td>{{ finding.band }}</td>
+            <td>{% if finding.included %}included{% else %}retained{% endif %}</td>
+            <td>{% if finding.adjudicated %}adjudicated{% else %}not adjudicated{% endif %}</td>
+            <td>{{ finding.decision_reason }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endblock %}

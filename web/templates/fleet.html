@@ -1,0 +1,76 @@
+{#
+  The fleet overview: one table of Sessions across every permitted Client.
+
+  The filter is a native form with a labelled select and a submit button, so it is
+  operable by keyboard and announced by name. The table carries a caption and a scope
+  on every header cell, and each row's standing is a word rather than a colour.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <form method="get" action="/">
+    <p>
+      <label for="client-filter">Client</label>
+      <select id="client-filter" name="{{ client_field }}">
+        <option value="">Every permitted Client</option>
+        {% for choice in roster %}
+          <option value="{{ choice.slug }}" {% if chosen and chosen.slug == choice.slug %}selected{% endif %}>
+            {{ choice.label }}
+          </option>
+        {% endfor %}
+      </select>
+      <button type="submit">Apply filter</button>
+    </p>
+  </form>
+
+  {% if not roster %}
+    <p>No Client is readable in this console's permitted set, so no Session is shown.</p>
+  {% elif not filter_recognised %}
+    <p>That Client filter names no Client in this console's permitted set, so no Session is shown.</p>
+  {% elif not rows %}
+    <p>No Session has been recorded for the permitted Clients shown above.</p>
+  {% else %}
+    <table>
+      <caption>
+        Sessions of the permitted Clients, most recently started first
+        ({{ rows | length }} shown).
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Client</th>
+          <th scope="col">Session</th>
+          <th scope="col">Agent CLI</th>
+          <th scope="col">Machine</th>
+          <th scope="col">Nesting depth</th>
+          <th scope="col">Standing</th>
+          <th scope="col">Tool calls</th>
+          <th scope="col">Model requests</th>
+          <th scope="col">Events accounted</th>
+          <th scope="col">Errors</th>
+          <th scope="col">Accrued cost (USD)</th>
+          <th scope="col">Started</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td>{{ row.client.label }}</td>
+            <th scope="row">
+              <a href="/sessions/{{ row.session.id }}">{{ row.session.id }}</a>
+            </th>
+            <td>{{ row.session.agent_cli }}</td>
+            <td>{{ row.session.machine_id }}</td>
+            <td>{{ row.session.depth }}</td>
+            <td>{{ row.standing }}</td>
+            <td>{{ row.session.tool_call_count }}</td>
+            <td>{{ row.session.model_request_count }}</td>
+            <td>{{ row.activity }}</td>
+            <td>{{ row.session.error_count }}</td>
+            <td>{{ row.cost }}</td>
+            <td>{{ row.session.started_at.isoformat() }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endblock %}

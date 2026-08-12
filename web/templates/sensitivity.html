@@ -1,0 +1,93 @@
+{#
+  The Threshold_Grid view.
+
+  The grid is a data table with headers in both directions: the review thresholds are
+  column headers and the auto-inclusion thresholds are row headers, each scoped, so a
+  screen reader announces which pair a cell belongs to. Every number inside a cell
+  carries its own text label, so no figure is distinguished by position or colour
+  alone, and an inapplicable pair renders the word with its reason instead of a count.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <p>
+    Each pair is answered by counting one residue search, so the whole grid costs one
+    search and no model call. The analysis writes nothing: it opens no write
+    transaction and connects with the {{ read_only_role }} role.
+  </p>
+
+  <form method="get" action="/sensitivity">
+    <p>
+      <label for="sensitivity-client">Client name</label>
+      <input
+        id="sensitivity-client"
+        type="text"
+        name="{{ client_field }}"
+        value="{{ client_slug }}"
+        autocomplete="off"
+      />
+      <button type="submit">Show grid</button>
+    </p>
+  </form>
+
+  {% if notice %}
+    <p role="status">{{ notice }}</p>
+  {% endif %}
+
+  {% if report %}
+    <table>
+      <caption>
+        Threshold sensitivity for {{ client_slug }}. Rows are auto-inclusion
+        thresholds, columns are review thresholds.
+        {% if report.ground_truth_available %}
+          Recovered planted fragments are reported because ground truth is available.
+        {% else %}
+          Recovered planted fragments are not reported because no ground-truth mapping
+          is available.
+        {% endif %}
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Auto-inclusion threshold</th>
+          {% for review in columns %}
+            <th scope="col">Review {{ "%.2f"|format(review) }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <th scope="row">{{ "%.2f"|format(row.auto_include_threshold) }}</th>
+            {% for cell in row.cells %}
+              <td>
+                {% if cell.applicable %}
+                  <ul>
+                    <li>Candidates: {{ cell.candidate_count }}</li>
+                    <li>Auto-included: {{ cell.auto_included_count }}</li>
+                    <li>Referred: {{ cell.referred_count }}</li>
+                    <li>
+                      Recovered:
+                      {% if cell.recovered_count is none %}
+                        not reported
+                      {% else %}
+                        {{ cell.recovered_count }}
+                      {% endif %}
+                    </li>
+                  </ul>
+                {% else %}
+                  <p>{{ inapplicable_label }}: {{ cell.reason }}</p>
+                {% endif %}
+              </td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <p>
+      One search per query Artifact was issued: {{ report.searches }} in total, at the
+      widest review threshold the grid names ({{ "%.2f"|format(report.searched_at) }}),
+      over {{ report.retained|length }} retained candidates.
+    </p>
+  {% endif %}
+{% endblock %}

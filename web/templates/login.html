@@ -1,0 +1,29 @@
+{#
+  The credential form: one labelled input, one submit control, no hints.
+
+  The form posts to the same path it is served from and carries no CSRF token,
+  because there is no session to protect yet and the cookie the submission issues is
+  SameSite=Strict, so a cross-site submission cannot establish one.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <p>
+    This console requires the operator credential held in the deployment's parameter
+    store. Sessions expire absolutely and are not extended by use.
+  </p>
+
+  <form method="post" action="/login" class="stack">
+    <div class="field">
+      <label for="credential">Operator credential</label>
+      <input
+        type="password"
+        id="credential"
+        name="{{ credential_field }}"
+        autocomplete="current-password"
+        required
+      />
+    </div>
+    <button type="submit">Sign in</button>
+  </form>
+{% endblock %}

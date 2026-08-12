@@ -1,0 +1,102 @@
+{#
+  One Erasure_Run and its per-Artifact Dispositions (Requirement 18.8).
+
+  The Dispositions are a table with a caption and a header scope on every column
+  header, because the page's substance is a grid of facts about rows. Each redacted
+  Artifact carries a link to its comparison view; the link text names the Artifact
+  rather than saying "view", so the link's accessible name is unique on the page.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <section aria-labelledby="run-summary">
+    <h2 id="run-summary">Run summary</h2>
+    <dl>
+      <dt>Run</dt>
+      <dd>{{ run.run_id }}</dd>
+      <dt>Client</dt>
+      <dd>{{ run.client_slug }}</dd>
+      <dt>Requester</dt>
+      <dd>{{ run.requester }}</dd>
+      <dt>Status</dt>
+      <dd>{{ run.status }}</dd>
+      <dt>Phase</dt>
+      <dd>{{ run.phase }}</dd>
+      <dt>Dry run</dt>
+      <dd>{{ "yes" if run.dry_run else "no" }}</dd>
+      <dt>Auto-inclusion threshold</dt>
+      <dd>{{ run.auto_include_threshold }}</dd>
+      <dt>Review threshold</dt>
+      <dd>{{ run.review_threshold }}</dd>
+      <dt>Unembedded candidates</dt>
+      <dd>{{ run.unembedded_count }}</dd>
+      <dt>Working rows deleted</dt>
+      <dd>{{ run.working_rows_deleted }}</dd>
+      <dt>Fencing generation of the finalising owner</dt>
+      <dd>{{ run.fencing_generation if run.fencing_generation is not none else "not recorded" }}</dd>
+    </dl>
+    <p>
+      <a href="/certificates/{{ run.run_id }}">Certificate for this run</a>
+    </p>
+  </section>
+
+  <section aria-labelledby="dispositions">
+    <h2 id="dispositions">Dispositions</h2>
+    <p>
+      {{ dispositions | length }} Artifact decisions, of which {{ redaction_count }}
+      were surgical redactions. Each row is the durable evidence the certificate is
+      assembled from, so this page and the certificate cannot disagree.
+    </p>
+    <table>
+      <caption>Per-Artifact dispositions of this erasure run</caption>
+      <thead>
+        <tr>
+          <th scope="col">Artifact</th>
+          <th scope="col">Kind</th>
+          <th scope="col">Disposition</th>
+          <th scope="col">Reason</th>
+          <th scope="col">Selection reason</th>
+          <th scope="col">Digest before</th>
+          <th scope="col">Digest after</th>
+          <th scope="col">Bindings before</th>
+          <th scope="col">Bindings after</th>
+          <th scope="col">Segments removed</th>
+          <th scope="col">Segments retained</th>
+          <th scope="col">Comparison</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for entry in dispositions %}
+          <tr>
+            <th scope="row">{{ entry.artifact_id }}</th>
+            <td>{{ entry.artifact_kind }}</td>
+            <td>{{ entry.disposition }}</td>
+            <td>{{ entry.reason }}</td>
+            <td>{{ entry.selection_reason }}</td>
+            <td>{{ entry.pre_digest if entry.pre_digest else "not recorded" }}</td>
+            <td>{{ entry.post_digest if entry.post_digest else "no surviving body" }}</td>
+            <td>{{ entry.bindings_before | join(", ") if entry.bindings_before else "none" }}</td>
+            <td>{{ entry.bindings_after | join(", ") if entry.bindings_after else "none" }}</td>
+            <td>
+              {{ entry.removed_segments if entry.removed_segments is not none
+                 else "not applicable: no rewrite" }}
+            </td>
+            <td>
+              {{ entry.retained_segments if entry.retained_segments is not none
+                 else "not applicable: no rewrite" }}
+            </td>
+            <td>
+              {% if entry.disposition == "surgical_redaction" %}
+                <a href="/erase/{{ run.run_id }}/redactions/{{ entry.artifact_id }}">
+                  Redaction comparison for {{ entry.artifact_id }}
+                </a>
+              {% else %}
+                <span>not applicable: no rewrite</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endblock %}

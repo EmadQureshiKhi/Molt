@@ -1,0 +1,85 @@
+{#
+  The Memory_Tier view.
+
+  One table row per tier, each carrying a text label for the tier and prose for its
+  mutability and its capability, so nothing is encoded by colour. The working tier's
+  two extra figures sit in their own labelled cells, and its row states plainly that
+  the tier is excluded from every piece of evidence.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <p>
+    Every count is read from the cluster inside one read-only transaction at the moment
+    this page was requested. Nothing here is cached or precomputed.
+  </p>
+
+  {% if notice %}
+    <p role="status">{{ notice }}</p>
+  {% endif %}
+
+  {% if view %}
+    <table>
+      <caption>
+        Memory tiers with live row counts. A tier's count is the total of its own
+        tables, so the ledger table contributes to both the episodic and the provenance
+        tier and the totals are per-tier rather than a partition of the cluster.
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Tier</th>
+          <th scope="col">Tables</th>
+          <th scope="col">Mutability</th>
+          <th scope="col">Capability</th>
+          <th scope="col">Live rows</th>
+          <th scope="col">Expired resident rows</th>
+          <th scope="col">Until next sweep</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for reading in view.readings %}
+          <tr>
+            <th scope="row">{{ reading.name }}</th>
+            <td>
+              <ul>
+                {% for table in reading.spec.tables %}
+                  <li>{{ table }}</li>
+                {% endfor %}
+              </ul>
+              {% if reading.spec.table_note %}
+                <p>{{ reading.spec.table_note }}</p>
+              {% endif %}
+            </td>
+            <td>{{ reading.spec.mutability }}</td>
+            <td>{{ reading.spec.capability }}</td>
+            <td>{{ reading.row_count }}</td>
+            <td>
+              {% if reading.expired_count is none %}
+                Not applicable: this tier has no row expiry sweep
+              {% else %}
+                {{ reading.expired_count }}
+              {% endif %}
+            </td>
+            <td>
+              {% if not reading.is_working %}
+                Not applicable: this tier has no row expiry sweep
+              {% elif reading.next_sweep is none %}
+                {{ unreadable_cron }}
+              {% else %}
+                {{ reading.next_sweep.total_seconds()|int }} second(s), from the
+                schedule the table itself reports ({{ reading.cron }})
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <p>
+      The <code>{{ working_tier }}</code> tier is deliberately excluded from all
+      evidence. Its rows are overwritten in place and physically removed on expiry by
+      the cluster, no Disposition is written for any of them, and nothing durable is
+      derived from them. Its counts describe scratch state, not stored memory.
+    </p>
+  {% endif %}
+{% endblock %}

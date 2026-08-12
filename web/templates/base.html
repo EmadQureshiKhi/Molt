@@ -1,0 +1,65 @@
+{#
+  The one layout every console page extends.
+
+  Accessibility is structural here rather than added later: there is one skip link
+  to the main landmark, the navigation is a list of links, the mode banner is a
+  region with its own accessible name, and every interactive control in a page that
+  extends this layout is a native element with a visible label. Focus outlines are
+  never removed by the stylesheet, so tab order is always visible.
+#}
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }} — Molt console</title>
+    <link rel="stylesheet" href="/static/molt.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    {% if demo_mode %}
+      <div class="banner" role="region" aria-label="Console mode">
+        <p>
+          Read-only demonstration mode. Controls that would change stored memory are
+          shown disabled with an explanation rather than hidden.
+        </p>
+      </div>
+    {% endif %}
+
+    <header class="masthead">
+      <p class="wordmark">Molt console</p>
+      {% if authenticated %}
+        <nav aria-label="Console sections">
+          <ul>
+            <li><a href="/">Fleet</a></li>
+            <li><a href="/lineage">Lineage</a></li>
+            <li><a href="/residue">Residue</a></li>
+            <li><a href="/erase">Erasure</a></li>
+            <li><a href="/retention">Retention</a></li>
+            <li><a href="/sensitivity">Sensitivity</a></li>
+            <li><a href="/procedures">Procedures</a></li>
+            <li><a href="/tiers">Memory tiers</a></li>
+            <li><a href="/approvals">Approvals</a></li>
+          </ul>
+        </nav>
+        <form method="post" action="/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <button type="submit">Sign out</button>
+        </form>
+      {% endif %}
+    </header>
+
+    <main id="main">
+      <h1>{{ title }}</h1>
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+      <p>
+        <a href="/spec">Interface specification</a>
+        <a href="/health">Health</a>
+      </p>
+    </footer>
+  </body>
+</html>

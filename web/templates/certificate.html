@@ -1,0 +1,182 @@
+{#
+  The certificate display and the outcome of a live verification (Requirement 25.7).
+
+  Three stored evidence fields are surfaced explicitly, because a field that is stored
+  and never displayed is a field nobody notices is wrong: the ownership block's
+  Fencing_Generation, the named Ledger_Checkpoint, and each Disposition's
+  first-attribution moment and method.
+
+  The verification control is a native submit button carrying its own visible label
+  and the session's CSRF token. When no verification has been attempted the page says
+  so; it never renders an absent key service as a negative answer about the
+  certificate.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <p>
+    <a href="/erase/{{ run_id }}">Back to the run detail</a>
+  </p>
+
+  <section aria-labelledby="verification">
+    <h2 id="verification">Verification</h2>
+    {% if verification.attempted %}
+      <p>
+        Outcome: <strong>{{ verification.outcome }}</strong>. Every check ran; a
+        negative answer here is a finding about the certificate rather than about this
+        deployment.
+      </p>
+      {% if verification.failed_checks %}
+        <table>
+          <caption>Checks that did not pass</caption>
+          <thead>
+            <tr>
+              <th scope="col">Check</th>
+              <th scope="col">Subject</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for entry in verification.failed_checks %}
+              <tr>
+                <th scope="row">{{ entry.check }}</th>
+                <td>{{ entry.subject }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+      {% if verification.notes %}
+        <ul>
+          {% for entry in verification.notes %}
+            <li>{{ entry.name }}: {{ entry.detail }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% else %}
+      <p>
+        No verification has been carried out on this page yet, so nothing here says
+        whether this certificate is valid.
+        {% if verification.missing_component %}
+          A live verification cannot be attempted in this deployment: it needs
+          {{ verification.missing_component }}. That is a missing operational
+          component, not a verification failure, and it says nothing about this
+          certificate.
+        {% endif %}
+      </p>
+    {% endif %}
+
+    <form method="post" action="/certificates/{{ run_id }}/verify" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <button type="submit"{% if demo_mode %} aria-describedby="verify-note"{% endif %}>
+        Verify this certificate now
+      </button>
+      {% if demo_mode %}
+        <p id="verify-note">
+          Verification reads only and is available in demonstration mode, because the
+          verifier connects with the read-only role and opens no write transaction.
+        </p>
+      {% endif %}
+    </form>
+  </section>
+
+  <section aria-labelledby="document">
+    <h2 id="document">The signed document</h2>
+    <dl>
+      <dt>Canonical digest</dt>
+      <dd>{{ certificate.canonical_digest }}</dd>
+      <dt>Signature present</dt>
+      <dd>{{ "yes" if signed else "no" }}</dd>
+      <dt>Signing key</dt>
+      <dd>{{ certificate.kms_key_id if certificate.kms_key_id else "not recorded" }}</dd>
+      <dt>Signing algorithm</dt>
+      <dd>{{ certificate.signing_algorithm if certificate.signing_algorithm else "not recorded" }}</dd>
+      <dt>Storage status</dt>
+      <dd>{{ certificate.storage_status }}</dd>
+      <dt>Stored object</dt>
+      <dd>{{ certificate.s3_key if certificate.s3_key else "not stored" }}</dd>
+    </dl>
+  </section>
+
+  {% set ownership = payload.get("ownership") if payload else none %}
+  <section aria-labelledby="ownership">
+    <h2 id="ownership">Ownership of the run</h2>
+    {% if ownership %}
+      <dl>
+        <dt>Finalising owner</dt>
+        <dd>{{ ownership.get("owner") if ownership.get("owner") else "not recorded" }}</dd>
+        <dt>Ownership generation the finalising owner held</dt>
+        <dd>
+          {{ ownership.get("fencing_generation")
+             if ownership.get("fencing_generation") is not none
+             else "not recorded: the run predates the lease columns" }}
+        </dd>
+        <dt>Idempotency key</dt>
+        <dd>
+          {{ ownership.get("idempotency_key")
+             if ownership.get("idempotency_key") else "not recorded" }}
+        </dd>
+      </dl>
+    {% else %}
+      <p>This certificate states no ownership block.</p>
+    {% endif %}
+  </section>
+
+  {% set checkpoint = payload.get("ledger_checkpoint") if payload else none %}
+  <section aria-labelledby="checkpoint">
+    <h2 id="checkpoint">Named Ledger checkpoint</h2>
+    {% if checkpoint %}
+      <dl>
+        <dt>Checkpoint</dt>
+        <dd>{{ checkpoint.get("checkpoint_id") }}</dd>
+        {% for name, value in checkpoint.items() %}
+          {% if name != "checkpoint_id" %}
+            <dt>{{ name }}</dt>
+            <dd>{{ value }}</dd>
+          {% endif %}
+        {% endfor %}
+      </dl>
+    {% else %}
+      <p>This certificate names no Ledger checkpoint.</p>
+    {% endif %}
+  </section>
+
+  {% set entries = payload.get("dispositions") if payload else none %}
+  <section aria-labelledby="attested-dispositions">
+    <h2 id="attested-dispositions">Attested dispositions</h2>
+    {% if entries %}
+      <table>
+        <caption>
+          Each attested Artifact with the moment and method of its first attribution
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Artifact</th>
+            <th scope="col">Disposition</th>
+            <th scope="col">Reason</th>
+            <th scope="col">First attributed at</th>
+            <th scope="col">First attribution method</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for entry in entries %}
+            <tr>
+              <th scope="row">{{ entry.get("artifact_id") }}</th>
+              <td>{{ entry.get("disposition") }}</td>
+              <td>{{ entry.get("reason") }}</td>
+              <td>
+                {{ entry.get("first_attributed_at")
+                   if entry.get("first_attributed_at") else "no attribution recorded" }}
+              </td>
+              <td>
+                {{ entry.get("first_attribution_method")
+                   if entry.get("first_attribution_method") else "no attribution recorded" }}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>This certificate attests no dispositions.</p>
+    {% endif %}
+  </section>
+{% endblock %}

@@ -1,0 +1,115 @@
+{#
+  The redaction comparison, rendered from stored evidence alone (Requirement 25.6).
+
+  There is no before pane holding text, and that is the point rather than an
+  omission: a surgical redaction destroys the pre-redaction body by design
+  (Requirement 18.6), so the before column carries the digest, the binding set, and
+  the count of segments the rewrite removed, all of which the disposition row
+  retained, and the page says so in prose above the table. Reconstructing the old
+  text would defeat the erasure the certificate attests to.
+
+  The comparison is a table with a caption and row headers so the pairing of before
+  and after is conveyed structurally rather than by side-by-side position alone.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <p>
+    <a href="/erase/{{ run_id }}">Back to the run detail</a>
+  </p>
+
+  <section aria-labelledby="not-retained">
+    <h2 id="not-retained">The original text was not retained</h2>
+    <p>
+      This Artifact's pre-redaction body no longer exists anywhere. The redaction
+      removed the erased Client's content from a body several Clients contributed to,
+      and nothing in this system stores a copy of what was removed or a text diff of
+      it, because either would be the erased content under another name. What is
+      retained, and what this page renders, is the digest of the body before the
+      rewrite, the digest after it, the Client bindings either side of it, and counts
+      of how many segments the rewrite removed and kept.
+    </p>
+    {% if not redacted %}
+      <p>
+        This Artifact's disposition is
+        <strong>{{ disposition.disposition }}</strong> rather than a surgical
+        redaction, so no rewrite was performed and there are no segment counts to
+        report.
+      </p>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="comparison">
+    <h2 id="comparison">Before and after</h2>
+    <table>
+      <caption>
+        Stored evidence for Artifact {{ disposition.artifact_id }} either side of the
+        redaction
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Evidence</th>
+          <th scope="col">Before the redaction</th>
+          <th scope="col">After the redaction</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Content digest</th>
+          <td>{{ disposition.pre_digest if disposition.pre_digest else "not recorded" }}</td>
+          <td>{{ disposition.post_digest if disposition.post_digest else "not recorded" }}</td>
+        </tr>
+        <tr>
+          <th scope="row">Client bindings</th>
+          <td>
+            {{ disposition.bindings_before | join(", ")
+               if disposition.bindings_before else "none" }}
+          </td>
+          <td>
+            {{ disposition.bindings_after | join(", ")
+               if disposition.bindings_after else "none" }}
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">Body text</th>
+          <td>not retained, by design</td>
+          <td>rendered in full below</td>
+        </tr>
+        <tr>
+          <th scope="row">Segments</th>
+          <td>
+            {{ disposition.removed_segments if disposition.removed_segments is not none
+               else "not applicable: no rewrite" }} removed
+          </td>
+          <td>
+            {{ disposition.retained_segments if disposition.retained_segments is not none
+               else "not applicable: no rewrite" }} retained
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">Decision</th>
+          <td>{{ disposition.selection_reason }}</td>
+          <td>{{ disposition.reason }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section aria-labelledby="surviving-body">
+    <h2 id="surviving-body">The post-redaction body</h2>
+    {% if body %}
+      <dl>
+        <dt>Digest of the body as it stands</dt>
+        <dd>{{ body.content_digest }}</dd>
+        <dt>Revision</dt>
+        <dd>{{ body.revision }}</dd>
+      </dl>
+      <pre aria-label="Post-redaction body of this Artifact">{{ body.text }}</pre>
+    {% else %}
+      <p>
+        This Artifact holds no body now: a later erasure removed the row outright, so
+        the evidence above is all that remains of it.
+      </p>
+    {% endif %}
+  </section>
+{% endblock %}

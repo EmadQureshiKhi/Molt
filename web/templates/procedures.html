@@ -1,0 +1,93 @@
+{#
+  The procedure standing view.
+
+  One table row per Learned_Procedure, with the change history in a nested table inside
+  a native disclosure element, so expanding a row needs no script and the control
+  carries its own accessible name. A below-floor procedure is marked in text rather
+  than by colour, and the marker states both halves of the truth: excluded from recall,
+  retained in storage.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <p>
+    The recall floor stands at {{ "%.2f"|format(recall_floor) }}. A procedure below it
+    is {{ below_floor_marker }}, so it is listed here rather than hidden. This view
+    reads only: it opens no write transaction.
+  </p>
+
+  {% if notice %}
+    <p role="status">{{ notice }}</p>
+  {% endif %}
+
+  <table>
+    <caption>
+      Learned procedures, lowest standing first, with retrieval and outcome counts and
+      the ordered history of every movement.
+    </caption>
+    <thead>
+      <tr>
+        <th scope="col">Procedure</th>
+        <th scope="col">Confidence</th>
+        <th scope="col">Recall standing</th>
+        <th scope="col">Retrievals</th>
+        <th scope="col">Outcomes</th>
+        <th scope="col">Change history</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr>
+          <th scope="row">{{ row.procedure_id }}</th>
+          <td>{{ "%.3f"|format(row.confidence) }}</td>
+          <td>
+            {% if row.below_floor %}
+              Below the recall floor: {{ below_floor_marker }}
+            {% else %}
+              Included in recall
+            {% endif %}
+          </td>
+          <td>{{ row.standing.retrievals }}</td>
+          <td>
+            <ul>
+              {% for classification, count in row.standing.outcomes %}
+                <li>{{ classification.value }}: {{ count }}</li>
+              {% endfor %}
+            </ul>
+          </td>
+          <td>
+            {% if row.changes %}
+              <details>
+                <summary>History of {{ row.changes|length }} movement(s)</summary>
+                <table>
+                  <caption>
+                    Confidence changes for procedure {{ row.procedure_id }}, oldest
+                    first.
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Prior value</th>
+                      <th scope="col">New value</th>
+                      <th scope="col">Triggering outcome</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for change in row.changes %}
+                      <tr>
+                        <td>{{ "%.3f"|format(change.prior_value) }}</td>
+                        <td>{{ "%.3f"|format(change.new_value) }}</td>
+                        <td>{{ change.outcome_id }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </details>
+            {% else %}
+              No recorded movement
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

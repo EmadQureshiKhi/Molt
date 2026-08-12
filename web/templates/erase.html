@@ -1,0 +1,148 @@
+{#
+  The erasure console: the start form and the durable progress region.
+
+  Accessibility is structural. The Client picker is a native select, both thresholds
+  are native number inputs, the dry-run and skip-backup toggles are native checkboxes
+  each with a label bound by `for`, and the start control is a button inside a form.
+  No control is a container with a handler.
+
+  The progress region is an `aria-live="polite"` container, so an update is announced
+  without stealing focus. It is populated by the small script below, which reads the
+  event stream and appends one list item per event; with no script it still renders the
+  identifier of the attempt and a link to its stream, so the page is operable without
+  JavaScript.
+
+  In read-only demonstration mode every control that would start a run is rendered
+  disabled with a stated explanation rather than hidden, so the console shows what it
+  is without exposing it.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <p>
+    Starting a run records the attempt and returns its identifier immediately. The run
+    itself proceeds outside this request, and progress below is read from the run row's
+    own phase marker and from the committed candidate, residue, and disposition rows,
+    so a reconnecting or late client sees the current state rather than nothing.
+  </p>
+
+  {% if demo_mode %}
+    <p role="status" id="erase-blocked">{{ blocked_explanation }}.</p>
+  {% endif %}
+
+  <form method="post" action="/erase" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+
+    <div class="field">
+      <label for="erase-client">Client</label>
+      <select
+        id="erase-client"
+        name="{{ client_field }}"
+        required
+        {% if demo_mode %}disabled aria-describedby="erase-blocked"{% endif %}
+      >
+        <option value="">Choose a Client</option>
+        {% for row in clients %}
+          <option value="{{ row.slug }}">{{ row.display_name }} ({{ row.slug }})</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="field">
+      <label for="erase-requester">Requester</label>
+      <input
+        type="text"
+        id="erase-requester"
+        name="{{ requester_field }}"
+        required
+        {% if demo_mode %}disabled aria-describedby="erase-blocked"{% endif %}
+      />
+    </div>
+
+    <div class="field">
+      <label for="erase-justification">Justification</label>
+      <input
+        type="text"
+        id="erase-justification"
+        name="{{ justification_field }}"
+        required
+        {% if demo_mode %}disabled aria-describedby="erase-blocked"{% endif %}
+      />
+    </div>
+
+    <div class="field">
+      <label for="erase-auto-include">Auto-inclusion threshold</label>
+      <input
+        type="number"
+        id="erase-auto-include"
+        name="{{ auto_include_field }}"
+        min="0"
+        max="2"
+        step="0.01"
+        value="{{ policy.auto_include_threshold }}"
+        {% if demo_mode %}disabled aria-describedby="erase-blocked"{% endif %}
+      />
+    </div>
+
+    <div class="field">
+      <label for="erase-review">Review threshold</label>
+      <input
+        type="number"
+        id="erase-review"
+        name="{{ review_field }}"
+        min="0"
+        max="2"
+        step="0.01"
+        value="{{ policy.review_threshold }}"
+        {% if demo_mode %}disabled aria-describedby="erase-blocked"{% endif %}
+      />
+    </div>
+
+    <div class="field">
+      <input
+        type="checkbox"
+        id="erase-dry-run"
+        name="{{ dry_run_field }}"
+        value="on"
+        {% if demo_mode %}disabled aria-describedby="erase-blocked"{% endif %}
+      />
+      <label for="erase-dry-run">Dry run, mutating no memory content</label>
+    </div>
+
+    <div class="field">
+      <input
+        type="checkbox"
+        id="erase-skip-backup"
+        name="{{ skip_backup_field }}"
+        value="on"
+        {% if demo_mode %}disabled aria-describedby="erase-blocked"{% endif %}
+      />
+      <label for="erase-skip-backup">Skip the backup, recording its absence</label>
+    </div>
+
+    <button
+      type="submit"
+      {% if demo_mode %}disabled aria-describedby="erase-blocked"{% endif %}
+    >Start the erasure run</button>
+  </form>
+
+  <section aria-labelledby="erase-progress-heading">
+    <h2 id="erase-progress-heading">Phase progress</h2>
+    {% if attempt %}
+      <p>
+        Watching attempt {{ attempt }}.
+        <a href="/erase/{{ attempt }}/stream">Open this attempt's event stream</a>
+      </p>
+    {% else %}
+      <p>No attempt is being watched. Start a run, or open a run's stream directly.</p>
+    {% endif %}
+    <ul
+      id="erase-progress"
+      aria-live="polite"
+      aria-atomic="false"
+      data-attempt="{{ attempt }}"
+    ></ul>
+  </section>
+
+  <script src="/static/erase-stream.js" defer></script>
+{% endblock %}

@@ -1,0 +1,118 @@
+{#
+  One lineage graph, rendered twice: as inline SVG and as an edge-list table.
+
+  The diagram is emitted in layer order, so tab order follows derivation order. Each node
+  is a focusable group carrying a `<title>` and an accessible name stating kind, Client
+  bindings, and creation time, and each kind has both its own shape and its own text
+  label so colour carries nothing on its own. The connecting lines are hidden from
+  assistive technology because the edge-list table below is their equivalent, and it is
+  the representation that works without vision.
+#}
+{% set positions = {} %}
+{% for node in graph.nodes %}
+  {% set _ = positions.update({node.id | string: [60 + node.layer * 190, 50 + node.order * 80]}) %}
+{% endfor %}
+
+{% if not graph.nodes %}
+  <p>No Artifact in this console's permitted Client set matches this view.</p>
+{% else %}
+  <figure>
+    <figcaption id="graph-caption">
+      Derivation graph: {{ graph.nodes | length }} node(s) in {{ graph.depth }} layer(s)
+      and {{ graph.edges | length }} edge(s). Parents sit to the left of the Artifacts
+      derived from them. Each node is focusable in layer order.
+    </figcaption>
+    <svg
+      role="group"
+      aria-labelledby="graph-caption"
+      width="{{ graph.depth * 190 + 160 }}"
+      height="{{ graph.width * 80 + 100 }}"
+      viewBox="0 0 {{ graph.depth * 190 + 160 }} {{ graph.width * 80 + 100 }}"
+    >
+      <g aria-hidden="true" stroke="currentColor" stroke-width="1">
+        {% for edge in graph.edges %}
+          {% set parent = positions.get(edge.parent_id | string) %}
+          {% set child = positions.get(edge.child_id | string) %}
+          {% if parent and child %}
+            <line x1="{{ parent[0] + 50 }}" y1="{{ parent[1] }}" x2="{{ child[0] - 50 }}" y2="{{ child[1] }}" />
+          {% endif %}
+        {% endfor %}
+      </g>
+      {% for node in graph.nodes %}
+        {% set point = positions.get(node.id | string) %}
+        <g tabindex="0" role="img" aria-label="{{ node.accessible_name }}">
+          <title>{{ node.accessible_name }}</title>
+          {% if node.shape == "ellipse" %}
+            <ellipse cx="{{ point[0] }}" cy="{{ point[1] }}" rx="48" ry="24"
+                     fill="none" stroke="currentColor" stroke-width="2" />
+          {% elif node.shape == "circle" %}
+            <circle cx="{{ point[0] }}" cy="{{ point[1] }}" r="26"
+                    fill="none" stroke="currentColor" stroke-width="2" />
+          {% elif node.shape == "diamond" %}
+            <polygon points="{{ point[0] }},{{ point[1] - 26 }} {{ point[0] + 50 }},{{ point[1] }} {{ point[0] }},{{ point[1] + 26 }} {{ point[0] - 50 }},{{ point[1] }}"
+                     fill="none" stroke="currentColor" stroke-width="2" />
+          {% else %}
+            <rect x="{{ point[0] - 50 }}" y="{{ point[1] - 24 }}" width="100" height="48"
+                  fill="none" stroke="currentColor" stroke-width="2" />
+          {% endif %}
+          <text x="{{ point[0] }}" y="{{ point[1] - 4 }}" text-anchor="middle">{{ node.kind }}</text>
+          <text x="{{ point[0] }}" y="{{ point[1] + 12 }}" text-anchor="middle">{{ node.short_id }}</text>
+        </g>
+      {% endfor %}
+    </svg>
+  </figure>
+
+  <table>
+    <caption>Edge list: the same graph as text, one row per derivation edge.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Child Artifact</th>
+        <th scope="col">Parent</th>
+        <th scope="col">Parent kind</th>
+        <th scope="col">Derivation method</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if not graph.edges %}
+        <tr>
+          <td colspan="4">No edge joins the nodes shown above.</td>
+        </tr>
+      {% else %}
+        {% for edge in graph.edges %}
+          <tr>
+            <th scope="row"><a href="/lineage/{{ edge.child_id }}">{{ edge.child_id }}</a></th>
+            <td>{{ edge.parent_id }}</td>
+            <td>{{ edge.parent_kind }}</td>
+            <td>{{ edge.derivation_method }}</td>
+          </tr>
+        {% endfor %}
+      {% endif %}
+    </tbody>
+  </table>
+
+  <table>
+    <caption>Node list: kind, shape, Client bindings, and creation time per node.</caption>
+    <thead>
+      <tr>
+        <th scope="col">Artifact</th>
+        <th scope="col">Kind</th>
+        <th scope="col">Shape</th>
+        <th scope="col">Layer</th>
+        <th scope="col">Client bindings</th>
+        <th scope="col">Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for node in graph.nodes %}
+        <tr>
+          <th scope="row"><a href="/lineage/{{ node.id }}">{{ node.id }}</a></th>
+          <td>{{ node.kind }}{% if node.detail %} ({{ node.detail }}){% endif %}</td>
+          <td>{{ node.shape }}</td>
+          <td>{{ node.layer }}</td>
+          <td>{{ node.client_label if node.client_label else "none recorded" }}</td>
+          <td>{{ node.created_at.isoformat() if node.created_at else "not recorded for this kind" }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}

@@ -1,0 +1,30 @@
+{#
+  The fleet lineage view: the derivation graph of the permitted Clients' Artifacts,
+  narrowable to one Client with a native labelled select.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <form method="get" action="/lineage">
+    <p>
+      <label for="lineage-client">Client</label>
+      <select id="lineage-client" name="{{ client_field }}">
+        <option value="">Every permitted Client</option>
+        {% for choice in roster %}
+          <option value="{{ choice.slug }}" {% if chosen and chosen.slug == choice.slug %}selected{% endif %}>
+            {{ choice.label }}
+          </option>
+        {% endfor %}
+      </select>
+      <button type="submit">Apply filter</button>
+    </p>
+  </form>
+
+  {% if not roster %}
+    <p>No Client is readable in this console's permitted set, so no lineage is shown.</p>
+  {% elif not filter_recognised %}
+    <p>That Client filter names no Client in this console's permitted set, so no lineage is shown.</p>
+  {% else %}
+    {% include "lineage_graph.html" %}
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,130 @@
+{#
+  One Session: its metadata, its chain verification status, its Event stream, and the
+  Sessions it spawned.
+
+  The chain status is a word and a set of figures rather than a colour. Both tables
+  carry a caption and header scopes, and the Event stream shows digests rather than
+  payloads because that is what the read returns.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <section aria-labelledby="session-summary">
+    <h2 id="session-summary">Summary</h2>
+    <dl>
+      <dt>Client</dt><dd>{{ detail.client.label }}</dd>
+      <dt>Session identifier</dt><dd>{{ detail.session.id }}</dd>
+      <dt>Agent CLI</dt><dd>{{ detail.session.agent_cli }}</dd>
+      <dt>Machine</dt><dd>{{ detail.session.machine_id }}</dd>
+      <dt>Nesting depth</dt><dd>{{ detail.session.depth }}</dd>
+      <dt>Outcome</dt><dd>{{ detail.session.outcome }}</dd>
+      <dt>Started</dt><dd>{{ detail.session.started_at.isoformat() }}</dd>
+      <dt>Ended</dt>
+      <dd>
+        {% if detail.session.ended_at %}
+          {{ detail.session.ended_at.isoformat() }}
+        {% else %}
+          still running
+        {% endif %}
+      </dd>
+      <dt>Accrued cost (USD)</dt><dd>{{ detail.session.cost_usd }}</dd>
+    </dl>
+  </section>
+
+  <section aria-labelledby="chain-status">
+    <h2 id="chain-status">Chain verification</h2>
+    {% if detail.report %}
+      <p>
+        Recomputed at request time: the chain is <strong>{{ detail.chain_state }}</strong>
+        over {{ detail.report.rows }} verified row(s).
+      </p>
+      <dl>
+        <dt>Terminal chain digest</dt><dd>{{ detail.report.terminal_digest }}</dd>
+        <dt>First disagreeing sequence number</dt>
+        <dd>
+          {% if detail.report.first_mismatch_seq is none %}
+            none: every row agreed
+          {% else %}
+            {{ detail.report.first_mismatch_seq }}
+          {% endif %}
+        </dd>
+        <dt>Field that disagreed</dt>
+        <dd>{{ detail.report.mismatch if detail.report.mismatch else "none" }}</dd>
+      </dl>
+    {% else %}
+      <p>
+        The chain is <strong>{{ unverified }}</strong>: the recomputation could not be
+        run against the cluster for this request, so no claim is made either way.
+      </p>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="event-stream">
+    <h2 id="event-stream">Event stream</h2>
+    {% if not detail.events %}
+      <p>This Session has recorded no Event.</p>
+    {% else %}
+      <table>
+        <caption>
+          The Session's Events in sequence order ({{ detail.events | length }} shown),
+          carrying digests rather than payloads.
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Sequence</th>
+            <th scope="col">Category</th>
+            <th scope="col">Occurred</th>
+            <th scope="col">Recorded</th>
+            <th scope="col">Redacted</th>
+            <th scope="col">Content digest</th>
+            <th scope="col">Chain digest</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for event in detail.events %}
+            <tr>
+              <th scope="row">{{ event.seq }}</th>
+              <td>{{ event.category }}</td>
+              <td>{{ event.occurred_at.isoformat() }}</td>
+              <td>{{ event.recorded_at.isoformat() }}</td>
+              <td>{{ "redacted" if event.redacted else "not redacted" }}</td>
+              <td>{{ event.content_digest }}</td>
+              <td>{{ event.chain_digest }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="spawned-sessions">
+    <h2 id="spawned-sessions">Spawned Sessions</h2>
+    {% if not detail.children %}
+      <p>This Session spawned no child Session.</p>
+    {% else %}
+      <table>
+        <caption>The Sessions this Session spawned, in start order.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Session</th>
+            <th scope="col">Agent CLI</th>
+            <th scope="col">Nesting depth</th>
+            <th scope="col">Outcome</th>
+            <th scope="col">Started</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for child in detail.children %}
+            <tr>
+              <th scope="row"><a href="/sessions/{{ child.id }}">{{ child.id }}</a></th>
+              <td>{{ child.agent_cli }}</td>
+              <td>{{ child.depth }}</td>
+              <td>{{ child.outcome }}</td>
+              <td>{{ child.started_at.isoformat() }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </section>
+{% endblock %}

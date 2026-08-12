@@ -1,0 +1,27 @@
+{#
+  One Artifact's ancestor and descendant subgraph, rendered by the same graph partial as
+  the fleet lineage view so the two representations cannot drift apart.
+#}
+{% extends "base.html" %}
+
+{% block content %}
+  <section aria-labelledby="artifact-summary">
+    <h2 id="artifact-summary">Focus Artifact</h2>
+    <dl>
+      <dt>Artifact identifier</dt>
+      <dd>{{ focus.id if focus else "not in the rendered graph" }}</dd>
+      <dt>Kind</dt>
+      <dd>{% if focus %}{{ focus.kind }}{% if focus.detail %} ({{ focus.detail }}){% endif %}{% else %}unknown{% endif %}</dd>
+      <dt>Content digest</dt><dd>{{ digest }}</dd>
+      <dt>Client bindings</dt>
+      <dd>{{ focus.client_label if focus and focus.client_label else "none recorded" }}</dd>
+      <dt>Ancestors reached</dt><dd>{{ ancestor_count }}</dd>
+      <dt>Descendants reached</dt><dd>{{ descendant_count }}</dd>
+    </dl>
+  </section>
+
+  <section aria-labelledby="artifact-graph">
+    <h2 id="artifact-graph">Ancestor and descendant subgraph</h2>
+    {% include "lineage_graph.html" %}
+  </section>
+{% endblock %}
