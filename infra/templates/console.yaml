@@ -1,0 +1,291 @@
+Description: >-
+  The console function, its HTTPS function endpoint, its execution role, its log
+  group, and the scheduled rule that invokes the checkpoint signer entry point
+  inside the same function. The signer is hosted here rather than in a task of its
+  own because the signing operation is granted to this one role and a second
+  signing principal would end that exclusivity.
+
+  Authentication posture, stated plainly. The function endpoint declares no request
+  signing, because the distribution in front of it is the only caller that is meant
+  to reach it and a distribution cannot sign a request as a cloud principal.
+  Authentication is at the application layer: the console requires the access
+  credential held in the parameter store and carries session material signed with
+  the session key, and an unauthenticated request is answered with a refusal rather
+  than with data.
+
+Parameters:
+  DeploymentName:
+    Type: String
+    Default: molt
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+    Description: Prefix every resource name in this stack carries.
+  ParameterPrefix:
+    Type: String
+    Default: /molt
+    Description: Hierarchy prefix the parameter names are declared under.
+  CodeBucket:
+    Type: String
+    Description: Bucket holding the deployment package.
+  CodeKey:
+    Type: String
+    Description: Key of the deployment package within that bucket.
+  HandlerEntryPoint:
+    Type: String
+    Default: molt.console.handler.handler
+    Description: The console function entry point.
+  CheckpointEntryPoint:
+    Type: String
+    Default: checkpoint_signer
+    Description: >-
+      The entry point inside the same function that the scheduled rule selects. The
+      rule carries it in the event body rather than targeting a second function, so
+      the signing role stays a single principal.
+  CheckpointIntervalMinutes:
+    Type: Number
+    Default: 60
+    MinValue: 1
+    Description: Interval between checkpoint signatures, matching the configured window.
+  MemorySize:
+    Type: Number
+    Default: 1024
+  TimeoutSeconds:
+    Type: Number
+    Default: 60
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+  SigningKeyArn:
+    Type: String
+    Description: Resource name of the signing key, from the key stack.
+  CertificateBucketArn:
+    Type: String
+    Description: Resource name of the certificate bucket, from the storage stack.
+  CertificatePrefix:
+    Type: String
+    Default: certificates/
+    Description: Key prefix within the bucket this role may write.
+  TextModelArns:
+    Type: CommaDelimitedList
+    Description: >-
+      Resource names of the adjudication and rewrite models the documented default
+      provider calls.
+  PolicyLanguageVersion:
+    Type: String
+    Description: Edition of the access-policy language every policy document declares.
+    AllowedPattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+
+Resources:
+  ConsoleLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/aws/lambda/${DeploymentName}-console"
+      RetentionInDays:
+        Ref: LogRetentionDays
+
+  # The one role in this deployment holding the signing permission. It also holds
+  # the certificate prefix of the bucket and nothing else of it, and the eraser
+  # connection string rather than the writer's.
+  ConsoleExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: molt-console-exec
+      AssumeRolePolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: console-least-privilege
+          PolicyDocument:
+            Version:
+              Ref: PolicyLanguageVersion
+            Statement:
+              - Sid: ReadOnlyItsOwnParameters
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/store/dsn/eraser"
+                  # The read-only connection the Sensitivity_Analyzer insists on. Read
+                  # alongside the eraser string rather than instead of it, because the
+                  # two serve different views of the same function.
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/store/dsn/reader"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/console/credential"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/console/session-key"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/providers/text-credential"
+              - Sid: DecryptTheParameterEncryptionKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource:
+                  Fn::Sub: "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+              # The signing permission, on one key, held by this role alone. The
+              # checkpoint signer uses the same grant from the same function.
+              - Sid: SignCertificatesAndCheckpoints
+                Effect: Allow
+                Action:
+                  - kms:Sign
+                  - kms:GetPublicKey
+                Resource:
+                  Ref: SigningKeyArn
+              - Sid: WriteAndReadCertificatesUnderTheirPrefixOnly
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  Fn::Sub:
+                    - "${BucketArn}/${Prefix}*"
+                    - BucketArn:
+                        Ref: CertificateBucketArn
+                      Prefix:
+                        Ref: CertificatePrefix
+              - Sid: InvokeTheAdjudicationAndRewriteModelsOnly
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  Ref: TextModelArns
+              - Sid: PublishMetricsInTheMoltNamespaceOnly
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Molt
+              - Sid: WriteItsOwnLogStreamsOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Sub:
+                    - "${LogGroupArn}:*"
+                    - LogGroupArn:
+                        Fn::GetAtt:
+                          - ConsoleLogGroup
+                          - Arn
+
+  ConsoleFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ConsoleLogGroup
+    Properties:
+      FunctionName:
+        Fn::Sub: "${DeploymentName}-console"
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      Handler:
+        Ref: HandlerEntryPoint
+      Role:
+        Fn::GetAtt:
+          - ConsoleExecutionRole
+          - Arn
+      Code:
+        S3Bucket:
+          Ref: CodeBucket
+        S3Key:
+          Ref: CodeKey
+      MemorySize:
+        Ref: MemorySize
+      Timeout:
+        Ref: TimeoutSeconds
+      LoggingConfig:
+        LogGroup:
+          Ref: ConsoleLogGroup
+      Environment:
+        Variables:
+          MOLT_PARAMETER_PREFIX:
+            Ref: ParameterPrefix
+          MOLT_STORE_DSN_PARAM:
+            Fn::Sub: "${ParameterPrefix}/store/dsn/eraser"
+          # The console holds the eraser role because the erasure console runs
+          # erasures from this same function. The Sensitivity_Analyzer refuses any
+          # role that can write, so it is given a read-only connection of its own
+          # rather than being run under the wider one.
+          MOLT_READER_DSN_PARAM:
+            Fn::Sub: "${ParameterPrefix}/store/dsn/reader"
+          MOLT_CONSOLE_CREDENTIAL_PARAM:
+            Fn::Sub: "${ParameterPrefix}/console/credential"
+          MOLT_CONSOLE_SESSION_KEY_PARAM:
+            Fn::Sub: "${ParameterPrefix}/console/session-key"
+          MOLT_TEXT_CREDENTIAL_PARAM:
+            Fn::Sub: "${ParameterPrefix}/providers/text-credential"
+          MOLT_STORE_ROLE: eraser
+          MOLT_KMS_KEY_ID:
+            Ref: SigningKeyArn
+
+  ConsoleFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn:
+        Fn::GetAtt:
+          - ConsoleFunction
+          - Arn
+      # No request signing at this layer; the console's own credential and signed
+      # session material are checked on every request inside the function.
+      AuthType: NONE
+      InvokeMode: BUFFERED
+
+  ConsoleFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: ConsoleFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  # One rule, one invocation per interval, no standing task. The entry point is
+  # carried in the event body, so the signer runs in the function that already
+  # holds the signing grant.
+  CheckpointScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: "${DeploymentName}-checkpoint"
+      Description: Invokes the checkpoint signer entry point inside the console function.
+      ScheduleExpression:
+        Fn::Sub: "rate(${CheckpointIntervalMinutes} minutes)"
+      State: ENABLED
+      Targets:
+        - Id: console-checkpoint-entry-point
+          Arn:
+            Fn::GetAtt:
+              - ConsoleFunction
+              - Arn
+          Input:
+            Fn::Sub: '{"entry_point": "${CheckpointEntryPoint}"}'
+
+  CheckpointSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: ConsoleFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+          - CheckpointScheduleRule
+          - Arn
+
+Outputs:
+  ConsoleFunctionUrl:
+    Description: The HTTPS endpoint the distribution fronts as its single origin.
+    Value:
+      Fn::GetAtt:
+        - ConsoleFunctionUrl
+        - FunctionUrl
+  ConsoleExecutionRoleArn:
+    Description: Resource name of the console execution role, the one signing principal.
+    Value:
+      Fn::GetAtt:
+        - ConsoleExecutionRole
+        - Arn

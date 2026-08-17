@@ -1,0 +1,98 @@
+Description: >-
+  The distribution in front of the console. It terminates transport security on its
+  own default certificate under its own generated host name, which is what removes
+  the need for both a custom domain and an issued certificate, and it carries no
+  fixed hourly charge. Its single origin is the console function endpoint.
+
+  Authentication posture, stated plainly. The distribution is publicly reachable, as
+  a public web console must be. Every request it forwards is authenticated by the
+  console itself with the credential and signed session material held in the
+  parameter store; the distribution adds no authentication of its own and is not
+  relied on for any.
+
+Parameters:
+  DeploymentName:
+    Type: String
+    Default: molt
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+    Description: Prefix the distribution comment carries.
+  ConsoleFunctionUrlDomain:
+    Type: String
+    Description: >-
+      Host name of the console function endpoint, taken from the console stack's
+      output with the scheme and the trailing separator removed. It is a generated
+      cloud host name rather than a secret, and it is supplied at deployment time
+      rather than written into this template.
+  CachePolicyId:
+    Type: String
+    Description: >-
+      Identifier of the managed cache policy the behaviour uses. The console renders
+      per-request HTML, so the policy this deployment names is the one that caches
+      nothing.
+  OriginRequestPolicyId:
+    Type: String
+    Description: >-
+      Identifier of the managed origin request policy that forwards what the console
+      needs while withholding the header a function endpoint rejects.
+  PriceClassName:
+    Type: String
+    Default: PriceClass_100
+    Description: Edge locations the distribution serves from; the narrowest class by default.
+
+Resources:
+  ConsoleDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment:
+          Fn::Sub: "${DeploymentName} console distribution"
+        Enabled: true
+        HttpVersion: http2
+        IPV6Enabled: true
+        PriceClass:
+          Ref: PriceClassName
+        # No custom domain name is declared, so the generated host name is the
+        # only name this distribution answers on and the default certificate is
+        # the only certificate it needs.
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: console-function-endpoint
+            DomainName:
+              Ref: ConsoleFunctionUrlDomain
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              HTTPSPort: 443
+        DefaultCacheBehavior:
+          TargetOriginId: console-function-endpoint
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId:
+            Ref: CachePolicyId
+          OriginRequestPolicyId:
+            Ref: OriginRequestPolicyId
+
+Outputs:
+  ConsoleDistributionDomain:
+    Description: The generated host name the console is reached on.
+    Value:
+      Fn::GetAtt:
+        - ConsoleDistribution
+        - DomainName
+  ConsoleDistributionId:
+    Description: Identifier of the distribution.
+    Value:
+      Ref: ConsoleDistribution
