@@ -1,0 +1,183 @@
+Description: >-
+  Log groups for the components that do not create their own, the metric filters
+  that turn structured log records into counted signals, the alarms that report a
+  failure nobody is watching for, and the guard that keeps the billable metric set
+  bounded.
+
+  The cardinality guard matters for cost rather than for correctness. A dimensioned
+  custom metric becomes a separate billable metric for every distinct combination of
+  its dimension values, so an unbounded dimension set turns a fixed amount of code
+  into an unbounded bill. Telemetry therefore counts the combinations it has emitted
+  and emits the overflow as a structured log record instead, which is charged by
+  volume rather than by cardinality. The ceiling lives in the parameter this stack
+  declares, and the alarm below reports when the overflow path is being taken.
+
+Parameters:
+  DeploymentName:
+    Type: String
+    Default: molt
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+    Description: Prefix every resource name in this stack carries.
+  ParameterPrefix:
+    Type: String
+    Default: /molt
+    Description: Hierarchy prefix the parameter names are declared under.
+  MetricNamespace:
+    Type: String
+    Default: Molt
+    Description: Namespace every custom metric is published under.
+  MetricCardinalityMax:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: Ceiling on distinct billable metric-and-dimension combinations.
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+  AlarmEvaluationPeriods:
+    Type: Number
+    Default: 1
+  AlarmPeriodSeconds:
+    Type: Number
+    Default: 300
+
+Resources:
+  # The command-line and provisioning paths write here; the function and task
+  # components own their own groups in their own stacks.
+  OperatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/molt/${DeploymentName}/operator"
+      RetentionInDays:
+        Ref: LogRetentionDays
+
+  ErasureLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/molt/${DeploymentName}/erasure"
+      RetentionInDays:
+        Ref: LogRetentionDays
+
+  # The guard's ceiling, read by every component at start-up. It is declared in the
+  # standard tier like every other parameter.
+  MetricCardinalityGuardParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/telemetry/metric-cardinality-guard"
+      Description: >-
+        Ceiling on distinct billable metric-and-dimension combinations; a
+        combination beyond it is emitted as a structured log record instead.
+      Type: String
+      Tier: Standard
+      Value:
+        Fn::Sub: "${MetricCardinalityMax}"
+
+  # Turning a structured log record into a counted signal, so an overflow is
+  # visible without adding a dimension and so an erasure failure is countable.
+  MetricCardinalityOverflowFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: ErasureLogGroup
+      FilterPattern: '{ $.event = "metric_cardinality_overflow" }'
+      MetricTransformations:
+        - MetricNamespace:
+            Ref: MetricNamespace
+          MetricName: metric_cardinality_overflow
+          MetricValue: "1"
+          DefaultValue: 0
+
+  ErasureFailureFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: ErasureLogGroup
+      FilterPattern: '{ $.severity = "error" }'
+      MetricTransformations:
+        - MetricNamespace:
+            Ref: MetricNamespace
+          MetricName: erasure_error
+          MetricValue: "1"
+          DefaultValue: 0
+
+  VerificationFailureFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName:
+        Ref: OperatorLogGroup
+      FilterPattern: '{ $.event = "verification_failed" }'
+      MetricTransformations:
+        - MetricNamespace:
+            Ref: MetricNamespace
+          MetricName: verification_failed
+          MetricValue: "1"
+          DefaultValue: 0
+
+  MetricCardinalityOverflowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: "${DeploymentName}-metric-cardinality-overflow"
+      AlarmDescription: >-
+        The bounded metric set is full and combinations are being diverted to
+        structured log records.
+      Namespace:
+        Ref: MetricNamespace
+      MetricName: metric_cardinality_overflow
+      Statistic: Sum
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      Period:
+        Ref: AlarmPeriodSeconds
+      EvaluationPeriods:
+        Ref: AlarmEvaluationPeriods
+      TreatMissingData: notBreaching
+
+  ErasureFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: "${DeploymentName}-erasure-failure"
+      AlarmDescription: An erasure run reported a failure.
+      Namespace:
+        Ref: MetricNamespace
+      MetricName: erasure_error
+      Statistic: Sum
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      Period:
+        Ref: AlarmPeriodSeconds
+      EvaluationPeriods:
+        Ref: AlarmEvaluationPeriods
+      TreatMissingData: notBreaching
+
+  VerificationFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: "${DeploymentName}-verification-failure"
+      AlarmDescription: A certificate or checkpoint verification reported a failed outcome.
+      Namespace:
+        Ref: MetricNamespace
+      MetricName: verification_failed
+      Statistic: Sum
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      Period:
+        Ref: AlarmPeriodSeconds
+      EvaluationPeriods:
+        Ref: AlarmEvaluationPeriods
+      TreatMissingData: notBreaching
+
+Outputs:
+  MetricCardinalityGuardParameterName:
+    Description: Name of the parameter holding the metric cardinality ceiling.
+    Value:
+      Ref: MetricCardinalityGuardParameter
+  OperatorLogGroupName:
+    Description: Log group the command-line and provisioning paths write to.
+    Value:
+      Ref: OperatorLogGroup
