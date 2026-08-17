@@ -17,12 +17,21 @@ from datetime import UTC, datetime
 from typing import Final
 from uuid import UUID, uuid4
 
+from molt.attest.builder import CertificatePolicy, IssuedCertificate, issue
+from molt.attest.keys import signer_from_configuration
+from molt.attest.objects import S3CertificateStore
 from molt.backup import BackupSettings
 from molt.cli.context import AGENT_CLI, VerbContext, client_id_for, machine_identifier
 from molt.cli.exits import ExitCode, UsageError
 from molt.cli.verbs.common import BATCH_SIZE_KEY, integer_overrides, threshold_overrides
 from molt.config.resolve import Configuration
-from molt.erase.engine import EngineSeams, ErasureRequest, PhaseProgress, run_erasure
+from molt.erase.engine import (
+    EngineSeams,
+    ErasureRequest,
+    PhaseProgress,
+    RunOutcome,
+    run_erasure,
+)
 from molt.models.event import JsonObject
 from molt.providers import EmbeddingProvider, TextProvider
 from molt.providers.selector import select_embedding_provider, select_text_provider
@@ -80,6 +89,10 @@ def run(context: VerbContext) -> ExitCode:
             progress=lambda progress: _report(context, progress),
         )
         outcome = run_erasure(store, request, seams)
+        # Issued here, inside the store's own block, because the certificate is read from
+        # the evidence the run has just committed and the connection that committed it is
+        # the one to read it back on.
+        issued = _issue(store, outcome, configuration)
 
     certificate_key = _certificate_key(outcome.run_id, configuration)
     document: JsonObject = {
@@ -96,13 +109,22 @@ def run(context: VerbContext) -> ExitCode:
         "fail_closed_rewrites": outcome.fail_closed_rewrites,
         "replayed": outcome.replayed,
         "certificate_admissible": outcome.certificate_admissible,
-        "certificate_object_key": certificate_key,
+        "certificate_object_key": certificate_key if issued is None else issued.object_key,
+        "certificate_id": None if issued is None else str(issued.certificate_id),
+        "certificate_digest": None if issued is None else issued.signed.payload_digest,
+        "certificate_storage_status": None if issued is None else issued.storage_status,
+        "certificate_storage_detail": None if issued is None else issued.storage_detail,
         "error_detail": outcome.error_detail,
     }
     emitter.narrate(
         f"deleted {outcome.deleted}, redacted {outcome.redacted}, retained {outcome.retained}"
     )
-    if outcome.certificate_admissible and certificate_key is not None:
+    if issued is not None:
+        emitter.narrate(f"certificate {issued.certificate_id} signed, digest recorded")
+        emitter.narrate(
+            f"certificate object {issued.bucket}/{issued.object_key}: {issued.storage_status}"
+        )
+    elif outcome.certificate_admissible and certificate_key is not None:
         emitter.narrate(f"certificate object key: {certificate_key}")
     if not outcome.completed:
         return emitter.fail(
@@ -147,7 +169,49 @@ def _embedding_provider(configuration: Configuration) -> EmbeddingProvider | Non
 
 
 def _certificate_key(run_id: UUID | None, configuration: Configuration) -> str | None:
-    """The object key the certificate for this run is written under."""
+    """The object key the certificate for this run is written under.
+
+    This is what the verb reports when no certificate was issued, which is a dry run or a
+    run that did not reach a state one may be assembled from. It is the key the certificate
+    *would* take rather than one that exists, so it is only ever reported alongside the
+    admissibility flag that says whether anything will be written there.
+    """
     if run_id is None:
         return None
     return f"{configuration.text(_CERT_PREFIX_KEY)}{run_id}.json"
+
+
+def _issue(
+    store: MemoryStore,
+    outcome: RunOutcome,
+    configuration: Configuration,
+) -> IssuedCertificate | None:
+    """Assemble, sign, and store the certificate for a run that earned one.
+
+    The engine records a completion and deliberately assembles no certificate, because a
+    certificate is built from the evidence a run has committed rather than from the run in
+    progress. Nothing then built one: the verb reported the object key a certificate would
+    have taken and returned success, so every completed run in a deployment ended with its
+    evidence in the cluster, no signed document anywhere, and an exit code saying it had
+    gone well. This is where that is closed.
+
+    None is returned for a run no certificate may be assembled from, which is the dry run
+    and any run that did not complete. Both are the surface's own judgement, read off the
+    outcome rather than decided here.
+
+    A failure to sign or to persist propagates. It is not softened into a warning, because
+    the certificate is the deliverable of a governed erasure: a run that deleted a tenant's
+    memory and produced no attestation of having done so is a run an operator has to know
+    about, and an exit code is how they find out. A failure to write the *object* does not
+    propagate and is not meant to — the signed document is already in the cluster, the row
+    records that the object write did not complete, and the storage status is reported.
+    """
+    if outcome.run_id is None or outcome.dry_run or not outcome.certificate_admissible:
+        return None
+    return issue(
+        store,
+        outcome.run_id,
+        signer=signer_from_configuration(configuration),
+        object_store=S3CertificateStore(),
+        policy=CertificatePolicy.from_configuration(configuration),
+    )

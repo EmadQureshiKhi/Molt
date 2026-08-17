@@ -25,6 +25,15 @@ attempt's idempotency key onto that row, so one statement finds the run by the r
 identifier or by the attempt identifier. Before the lease is claimed there is no run
 row at all, and the stream says `queued` rather than inventing a phase.
 
+**The two reads take the narrowest handle; the start route keeps the wider one.** This
+function authenticates as the eraser role because the erasure engine runs from it, so a
+handler that writes nothing would otherwise read through a role that can write merely
+because that handle was in scope. The console page and the progress stream take
+`read_only_store()`, which is the read-only connection where the deployment configures one
+and the primary handle where it does not, so a local run or a one-connection demonstration
+keeps both views. `POST /erase` keeps the primary handle: the fleet lookup it performs is
+the precondition of the run it records, and the run itself writes.
+
 **Two refusals guard the mutation, not one.** The route table marks `erase_start` a
 mutation, so the application's middleware refuses it without the session's own CSRF
 token before this module is reached; and this handler refuses again when read-only
@@ -37,7 +46,9 @@ Every statement is a whole module-level literal with bound parameters.
 
 from __future__ import annotations
 
+import importlib
 import json
+import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -49,6 +60,9 @@ from uuid import UUID, uuid4
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
+from molt.attest.builder import CertificatePolicy, issue
+from molt.attest.keys import signer_from_configuration
+from molt.attest.objects import S3CertificateStore
 from molt.backup import BackupSettings
 from molt.cli.context import AGENT_CLI, machine_identifier
 from molt.config.resolve import Configuration
@@ -60,7 +74,14 @@ from molt.console.routes.erasure_common import (
     fleet,
     templates_of,
 )
-from molt.erase.engine import EngineSeams, ErasureRequest, Phase, RunStatus, run_erasure
+from molt.erase.engine import (
+    EngineSeams,
+    ErasureRequest,
+    Phase,
+    RunOutcome,
+    RunStatus,
+    run_erasure,
+)
 from molt.erase.residue import ResiduePolicy
 from molt.errors import StoreError
 from molt.providers.selector import select_embedding_provider, select_text_provider
@@ -71,17 +92,25 @@ from molt.telemetry import Severity, log
 
 __all__ = [
     "CONSOLE_TEMPLATE",
+    "ERASURE_ENTRY_POINT",
+    "FUNCTION_NAME_VARIABLE",
     "LAUNCHER_STATE_KEY",
+    "PLAN_FIELD",
     "SELECT_CANDIDATE_COUNT_STATEMENT",
     "SELECT_DISPOSITION_COUNTS_STATEMENT",
     "SELECT_RESIDUE_COUNTS_STATEMENT",
     "SELECT_RUN_STATEMENT",
     "RunPlan",
     "RunProgress",
-    "detached_launcher",
+    "configured_launcher",
+    "dispatched_launcher",
     "erase_console",
     "erase_start",
     "erase_stream",
+    "in_process_launcher",
+    "perform_dispatched",
+    "plan_document",
+    "plan_of",
     "progress_of",
     "stream_body",
 ]
@@ -97,6 +126,23 @@ CONSOLE_TEMPLATE: Final[str] = "erase.html"
 
 # Where a deployment or a test puts the launcher the start route hands a plan to.
 LAUNCHER_STATE_KEY: Final[str] = "molt_erasure_launcher"
+
+# The variable the function host names the running function in. Its presence is what
+# tells this module it is running somewhere that suspends the process once a response is
+# written, which decides which launcher is correct.
+FUNCTION_NAME_VARIABLE: Final[str] = "AWS_LAMBDA_FUNCTION_NAME"
+
+# The entry point the second invocation is dispatched under, and the field the plan
+# travels in. The field name is this module's rather than the handler's because the plan
+# is this module's shape; the entry-point field is shared with the handler, which reads it
+# to route the invocation at all.
+ERASURE_ENTRY_POINT: Final[str] = "erasure_worker"
+ENTRY_POINT_FIELD: Final[str] = "entry_point"
+PLAN_FIELD: Final[str] = "plan"
+
+# The cloud client package, resolved by name at the point of use so that importing this
+# module needs no cloud dependency and a locally served console never loads one.
+_BOTO_MODULE: Final[str] = "boto3"
 
 # The submitted field names, fixed so the template and the handler agree.
 CLIENT_FIELD: Final[str] = "client"
@@ -197,14 +243,55 @@ class RunPlan:
 RunLauncher = Callable[[RunPlan], None]
 
 
-def detached_launcher(configuration: Configuration) -> RunLauncher:
-    """The launcher a deployment uses: the run proceeds outside this request.
+def plan_document(plan: RunPlan) -> dict[str, object]:
+    """One plan as plain values, for a launcher that hands it to another process.
+
+    Every field is a scalar the wire form admits, so a plan survives the handoff
+    unchanged rather than being partly reconstructed from defaults at the far end.
+    """
+    return {
+        "client_id": str(plan.request.client_id),
+        "client_slug": plan.client_slug,
+        "requester": plan.request.requester,
+        "justification": plan.request.justification,
+        "idempotency_key": plan.request.idempotency_key,
+        "dry_run": plan.request.dry_run,
+        "skip_backup": plan.request.skip_backup,
+        "auto_include_threshold": plan.auto_include_threshold,
+        "review_threshold": plan.review_threshold,
+    }
+
+
+def plan_of(document: Mapping[str, object]) -> RunPlan:
+    """Rebuild one plan from the document above, refusing a field it cannot read."""
+    return RunPlan(
+        request=ErasureRequest(
+            client_id=UUID(str(document["client_id"])),
+            requester=str(document["requester"]),
+            justification=str(document["justification"]),
+            idempotency_key=str(document["idempotency_key"]),
+            dry_run=bool(document.get("dry_run", False)),
+            skip_backup=bool(document.get("skip_backup", False)),
+        ),
+        client_slug=str(document["client_slug"]),
+        auto_include_threshold=float(str(document["auto_include_threshold"])),
+        review_threshold=float(str(document["review_threshold"])),
+    )
+
+
+def in_process_launcher(configuration: Configuration) -> RunLauncher:
+    """The launcher a long-lived process uses: a thread of its own, outliving the request.
 
     The worker opens its own store rather than borrowing the request's, because the
     request's connection is returned to the pool the moment the response is written,
-    and the run's phases must not depend on this invocation staying alive. Progress
-    is durable either way: every phase advance is an assignment to the run row's
-    marker, which is what the stream reads.
+    and the run's phases must not depend on this invocation staying alive. Progress is
+    durable either way: every phase advance is an assignment to the run row's marker,
+    which is what the stream reads.
+
+    This is correct where the process keeps running after it answers, which is the
+    locally served console. It is wrong where the host suspends the process the moment
+    the response is written, and the function host does exactly that — see the launcher
+    below.
     """
 
     def launch(plan: RunPlan) -> None:
@@ -219,6 +306,71 @@ def detached_launcher(configuration: Configuration) -> RunLauncher:
     return launch
 
 
+def dispatched_launcher(function_name: str) -> RunLauncher:
+    """The launcher a function deployment uses: a second invocation performs the run.
+
+    A thread cannot be the answer here, and the reason is a property of the host rather
+    than of the thread. A function host freezes the execution environment as soon as the
+    response is written, so a thread started to outlive the request is suspended mid-run
+    and resumed only if that same environment happens to serve another request. The
+    observable outcome was an attempt that answered with its identifier, a stream that
+    reported no phase, and no run row at all — a start that looked accepted and did
+    nothing.
+
+    So the run is handed to a second invocation of this same function, which the host
+    gives its own environment and its own full timeout. The same function rather than
+    another, deliberately: the console's execution role is the one principal permitted to
+    sign a certificate and to write to the evidence bucket, so a worker anywhere else
+    would need that grant duplicated, and the single-signing-principal claim is one this
+    deployment asserts across every stack.
+
+    The handoff is asynchronous. The start route answers the moment the platform accepts
+    the invocation, so the operator's request is short whatever the run costs — which is
+    what keeps it inside the request timeout of anything in front of the console.
+    """
+
+    def launch(plan: RunPlan) -> None:
+        client = importlib.import_module(_BOTO_MODULE).client("lambda")
+        client.invoke(
+            FunctionName=function_name,
+            InvocationType="Event",
+            Payload=json.dumps(
+                {ENTRY_POINT_FIELD: ERASURE_ENTRY_POINT, PLAN_FIELD: plan_document(plan)}
+            ).encode("utf-8"),
+        )
+        log(
+            Severity.INFO,
+            _COMPONENT,
+            "handed an erasure run to a second invocation of this function",
+            attempt=str(plan.attempt),
+            client=plan.client_slug,
+        )
+
+    return launch
+
+
+def configured_launcher(configuration: Configuration) -> RunLauncher:
+    """The launcher this process should use, decided by the host it is running on.
+
+    The function host names the running function in the environment, and nothing else
+    does, so its presence is what distinguishes a deployment that must dispatch from a
+    locally served console that can use a thread. Reading the host rather than taking a
+    configuration value means a deployment cannot be configured into the launcher that
+    silently does nothing there.
+    """
+    named = os.environ.get(FUNCTION_NAME_VARIABLE, "").strip()
+    if named:
+        # The dispatching launcher needs no configuration: the invocation it hands the
+        # plan to loads its own, which is the point of dispatching rather than threading.
+        return dispatched_launcher(named)
+    return in_process_launcher(configuration)
+
+
+def perform_dispatched(document: Mapping[str, object], configuration: Configuration) -> None:
+    """Run one dispatched plan. The entry point of the second invocation."""
+    _perform(plan_of(document), configuration)
+
+
 def _perform(plan: RunPlan, configuration: Configuration) -> None:
     """Run the engine for one plan, recording the failure rather than raising it.
 
@@ -228,7 +380,8 @@ def _perform(plan: RunPlan, configuration: Configuration) -> None:
     """
     try:
         with MemoryStore.from_configuration(configuration) as store:
-            run_erasure(store, plan.request, _seams(configuration, store))
+            outcome = run_erasure(store, plan.request, _seams(configuration, store))
+            _attest(store, outcome, configuration, attempt=plan.attempt)
     except Exception as failure:
         log(
             Severity.ERROR,
@@ -237,6 +390,57 @@ def _perform(plan: RunPlan, configuration: Configuration) -> None:
             attempt=str(plan.attempt),
             error_type=type(failure).__name__,
         )
+
+
+def _attest(
+    store: MemoryStore,
+    outcome: RunOutcome,
+    configuration: Configuration,
+    *,
+    attempt: object,
+) -> None:
+    """Issue the certificate for a run that earned one, and say so either way.
+
+    The engine records a completion and deliberately assembles no certificate, because a
+    certificate is read from the evidence a run has committed. This is where the console's
+    worker does that, on the same connection that committed it, so a run started from the
+    console ends in the same signed document a run started from the command line does.
+
+    A failure here is logged and not raised, which is this function following the rule its
+    caller already states: a worker has no request to answer, and the evidence of what went
+    wrong is the row plus the record. It is logged at error rather than warning because a
+    completed erasure with no attestation of it is a governance gap rather than a nuisance.
+    """
+    if outcome.run_id is None or outcome.dry_run or not outcome.certificate_admissible:
+        return
+    try:
+        issued = issue(
+            store,
+            outcome.run_id,
+            signer=signer_from_configuration(configuration),
+            object_store=S3CertificateStore(),
+            policy=CertificatePolicy.from_configuration(configuration),
+        )
+    except Exception as failure:
+        log(
+            Severity.ERROR,
+            _COMPONENT,
+            "a completed erasure run produced no certificate",
+            attempt=str(attempt),
+            run_id=str(outcome.run_id),
+            error_type=type(failure).__name__,
+        )
+        return
+    log(
+        Severity.INFO,
+        _COMPONENT,
+        "a console-started erasure run was attested",
+        attempt=str(attempt),
+        run_id=str(outcome.run_id),
+        certificate_id=str(issued.certificate_id),
+        object_key=issued.object_key,
+        storage_status=issued.storage_status,
+    )
 
 
 def _seams(configuration: Configuration, store: MemoryStore) -> EngineSeams:
@@ -275,7 +479,7 @@ def launcher_of(request: Request) -> RunLauncher:
     """The launcher this request's application was built with, or the detached one."""
     held = getattr(request.app.state, LAUNCHER_STATE_KEY, None)
     if held is None:
-        return detached_launcher(configuration_of(request))
+        return configured_launcher(configuration_of(request))
     return cast(RunLauncher, held)
 
 
@@ -404,7 +608,7 @@ async def erase_console(request: Request) -> Response:
             "demo_mode": console.demo_mode,
             "authenticated": session is not None,
             "csrf_token": "" if session is None else session.csrf_token,
-            "clients": fleet(console.store),
+            "clients": fleet(console.read_only_store()),
             "policy": policy,
             "attempt": attempt,
             "blocked_explanation": _DEMONSTRATION_REFUSAL,
@@ -480,7 +684,7 @@ async def erase_stream(request: Request) -> Response:
         attempt = UUID(raw)
     except ValueError:
         return JSONResponse({"error": "that identifier is not one"}, status_code=_BAD_REQUEST)
-    progress = progress_of(console.store, attempt)
+    progress = progress_of(console.read_only_store(), attempt)
     # One whole reading rather than a held connection. A streamed response is
     # truncated by the function host the moment the invocation's request is reported
     # disconnected, so the events for this reading are assembled and written in full

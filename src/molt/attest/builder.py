@@ -1315,9 +1315,13 @@ def publish(
             object_lock_mode=OBJECT_LOCK_MODE,
             retain_until=require_aware(now, "a retention reading") + policy.retention,
         )
+    # The detail carries the failure's own words rather than only its class name. This row
+    # is the sole account of why a signed certificate was not stored, and a class name
+    # alone does not distinguish a denied permission from a bucket that will not accept the
+    # retention it was asked for, which need different repairs.
     except Exception as error:
         status = STORAGE_FAILED
-        detail = type(error).__name__
+        detail = f"{type(error).__name__}: {error}"
         version = None
     _record_storage(
         store, evidence, certificate_id, key=key, version=version, status=status, detail=detail
