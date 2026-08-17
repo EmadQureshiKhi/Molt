@@ -1,0 +1,74 @@
+{
+  "_note": "Non-secret deployment values only. Every secret is referenced by parameter name and its value is written straight into the parameter store by the provisioning scripts, so no secret value appears in this file, in a template, or in a deployment argument. Values a stack takes from an earlier stack's output are resolved by deploy.sh and are absent here.",
+  "common": {
+    "DeploymentName": "molt",
+    "ParameterPrefix": "/molt",
+    "PolicyLanguageVersion": "2012-10-17",
+    "LogRetentionDays": "7"
+  },
+  "network": {
+    "VpcCidr": "10.20.0.0/16",
+    "PublicSubnetACidr": "10.20.0.0/20",
+    "PublicSubnetBCidr": "10.20.16.0/20"
+  },
+  "parameters": {
+    "PlaceholderValue": "replace-out-of-band",
+    "IngressMaxAgeSeconds": "300",
+    "MetricCardinalityMax": "10"
+  },
+  "kms": {
+    "ConsoleExecutionRoleName": "molt-console-exec",
+    "VerifierRoleName": "molt-verifier"
+  },
+  "storage": {
+    "CertificatePrefix": "certificates/",
+    "RetentionDays": "1",
+    "CollectorExecutionRoleName": "molt-collector-exec",
+    "ConsoleExecutionRoleName": "molt-console-exec",
+    "VerifierRoleName": "molt-verifier"
+  },
+  "collector": {
+    "CodeBucket": "REPLACE_WITH_DEPLOYMENT_PACKAGE_BUCKET",
+    "CodeKey": "REPLACE_WITH_DEPLOYMENT_PACKAGE_KEY",
+    "HandlerEntryPoint": "molt.collector.handler.handler",
+    "ReservedConcurrency": "10",
+    "MemorySize": "512",
+    "TimeoutSeconds": "30",
+    "EmbeddingModelArn": "REPLACE_WITH_EMBEDDING_MODEL_RESOURCE_NAME"
+  },
+  "console": {
+    "CodeBucket": "REPLACE_WITH_DEPLOYMENT_PACKAGE_BUCKET",
+    "CodeKey": "REPLACE_WITH_DEPLOYMENT_PACKAGE_KEY",
+    "HandlerEntryPoint": "molt.console.handler.handler",
+    "CheckpointEntryPoint": "checkpoint_signer",
+    "CheckpointIntervalMinutes": "60",
+    "MemorySize": "1024",
+    "TimeoutSeconds": "60",
+    "CertificatePrefix": "certificates/",
+    "TextModelArns": "REPLACE_WITH_ADJUDICATION_MODEL_RESOURCE_NAME,REPLACE_WITH_REWRITE_MODEL_RESOURCE_NAME"
+  },
+  "cdn": {
+    "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+    "OriginRequestPolicyId": "b689b0a8-53d0-40ab-baf2-68738e2966ac",
+    "PriceClassName": "PriceClass_100"
+  },
+  "watcher": {
+    "ImageUri": "REPLACE_WITH_TASK_IMAGE_REFERENCE",
+    "TaskCpu": "256",
+    "TaskMemory": "512",
+    "PollIntervalSeconds": "2"
+  },
+  "mcp": {
+    "ImageUri": "REPLACE_WITH_TASK_IMAGE_REFERENCE",
+    "TaskCpu": "256",
+    "TaskMemory": "512",
+    "MaxResults": "50",
+    "PermittedClients": "REPLACE_WITH_TENANT_SLUG"
+  },
+  "observability": {
+    "MetricNamespace": "Molt",
+    "MetricCardinalityMax": "10",
+    "AlarmEvaluationPeriods": "1",
+    "AlarmPeriodSeconds": "300"
+  }
+}
