@@ -1,0 +1,1326 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Molt interface specification",
+    "version": "1",
+    "summary": "Every Collector route, every Web_Console route, and every Molt_MCP_Server tool as one document.",
+    "description": "One document covers three surfaces so the vocabulary is not split across three. Because two surfaces serve a route at the same served path, each path key here is namespaced by its surface and the served path is stated on every operation as `x-molt-path`. Read `x-molt-surface` to know which process answers, `x-molt-path` to know what a caller requests, `x-molt-authentication` to know what the request must carry, and `x-molt-mutation` to know whether the route changes stored state. An operation that takes neither a parameter nor a body states `x-molt-request-shape` as `empty` rather than leaving the request shape unstated. Response schemas under `text/html` describe the view model a rendered page presents, which is that page's response shape; response schemas under `application/json` describe the serialised body. The command-line verbs are listed under `x-molt-cli` because they are a caller surface with no path of their own. This document names shapes only: it carries no memory content, no identifier of any stored row, and no example drawn from a corpus."
+  },
+  "x-molt-surfaces": {
+    "collector": {
+      "prefix": "/collector",
+      "description": "The ingest and recall endpoint an engineer machine reaches over HTTPS, holding no database credential of its own."
+    },
+    "console": {
+      "prefix": "/console",
+      "description": "The Web_Console, whose every content route requires a session and whose mutation routes are refused in demonstration mode."
+    },
+    "tools": {
+      "prefix": "/tools",
+      "description": "The Molt_MCP_Server tool registry, described as one operation per tool so argument and result schemas live beside the route schemas."
+    }
+  },
+  "x-molt-authentication-kinds": {
+    "none": "The route answers a caller carrying nothing. Reserved for the liveness route and this document's own route, neither of which reads a table.",
+    "bearer": "A bearer token, verified before the request is read.",
+    "bearer+signature": "A bearer token and an Ingress_Signature over the body. Both ingest routes require both.",
+    "session": "A console session cookie. A mutation additionally requires the session's own token in the submitted form.",
+    "tool-session": "An established Molt_MCP_Server session, whose permitted Client set is configured rather than requested."
+  },
+  "x-molt-cli": {
+    "description": "The command-line verbs, one entry per verb as the argument tree declares it. Two-word verbs are stated as two words.",
+    "verbs": [
+      { "name": "erase", "summary": "erase one Client's memory" },
+      { "name": "residue", "summary": "report residue candidates" },
+      { "name": "sensitivity", "summary": "report the threshold grid" },
+      { "name": "contend", "summary": "demonstrate lease contention and fencing" },
+      { "name": "attest", "summary": "work with erasure certificates" },
+      { "name": "attest verify", "summary": "verify a certificate or a checkpoint" },
+      { "name": "recall", "summary": "recall prior work semantically" },
+      { "name": "watch", "summary": "run the policy watcher" },
+      { "name": "serve", "summary": "run the web console locally" },
+      { "name": "mcp", "summary": "run the tool server" },
+      { "name": "seed", "summary": "generate a seeded corpus" },
+      { "name": "migrate", "summary": "apply migrations in order" },
+      { "name": "verify-chain", "summary": "verify one hash chain by recomputation" },
+      { "name": "retention", "summary": "print the retention report" }
+    ]
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The ingest credential. Tenancy is re-derived from the presented principal rather than read from the request."
+      },
+      "ingressSignature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Molt-Signature",
+        "description": "The Ingress_Signature over the request body, required by both ingest routes and by neither read route."
+      },
+      "consoleSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "molt_session",
+        "description": "The console session cookie, signed and absolutely expiring."
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "The request carried no acceptable credential, or the console session was absent, edited, or expired.",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/ErrorReport" } }
+        }
+      },
+      "Forbidden": {
+        "description": "The credential was accepted and the action was refused: an invalid Ingress_Signature, a Client outside the permitted set, a missing session token on a mutation, or a mutation attempted while demonstration mode is enabled.",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/ErrorReport" } }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "The declared or transported body exceeds the configured bound, so no record of the batch was read.",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/ErrorReport" } }
+        }
+      },
+      "Unavailable": {
+        "description": "A dependency this route needs did not answer, or the tracked document this route serves could not be read. The body names no path and no host.",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/ErrorReport" } }
+        }
+      },
+      "NotImplemented": {
+        "description": "The route is declared with its posture stated and its view is not yet claimed. Returned only after the authentication check, so an unclaimed route is never an unauthenticated one.",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/ErrorReport" } }
+        }
+      }
+    },
+    "schemas": {
+      "ErrorReport": {
+        "type": "object",
+        "description": "Every refusal and every unavailability in one shape, naming the condition and nothing about the deployment.",
+        "properties": {
+          "error": { "type": "string", "description": "The condition, named in words a caller can act on." },
+          "detail": { "type": "string", "description": "What the caller may correct, carrying no path, host, or stored value." }
+        },
+        "required": ["error"],
+        "additionalProperties": false
+      },
+      "EventBatchAccepted": {
+        "type": "object",
+        "description": "What one ingest batch produced: how many records were persisted and why each refused record was refused.",
+        "properties": {
+          "accepted": { "type": "integer", "description": "Records persisted." },
+          "rejected": { "type": "integer", "description": "Records not persisted." },
+          "reasons": {
+            "type": "array",
+            "description": "One entry per refused record, naming the record's position and the reason class.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": { "type": "integer" },
+                "reason": {
+                  "type": "string",
+                  "enum": ["unreadable", "unparsed", "invalid", "refused"]
+                }
+              },
+              "required": ["index", "reason"]
+            }
+          }
+        },
+        "required": ["accepted", "rejected"]
+      },
+      "SessionMetadata": {
+        "type": "object",
+        "description": "The Session a machine declares, whose tenancy the Collector re-derives rather than trusts.",
+        "properties": {
+          "client_slug": { "type": "string" },
+          "machine_id": { "type": "string" },
+          "agent_tool": { "type": "string" },
+          "branch": { "type": "string" }
+        },
+        "required": ["machine_id"]
+      },
+      "SessionAccepted": {
+        "type": "object",
+        "properties": {
+          "session_id": { "type": "string", "format": "uuid" },
+          "created": { "type": "boolean", "description": "Whether this request opened the Session rather than updated it." }
+        },
+        "required": ["session_id", "created"]
+      },
+      "RecallQuery": {
+        "type": "object",
+        "description": "A recall request. The permitted Client set is configured, so no field here can widen it.",
+        "properties": {
+          "query_text": { "type": "string" },
+          "k": { "type": "integer", "description": "Rows asked for, answered at the configured maximum when it exceeds it." },
+          "session_id": { "type": "string", "format": "uuid" }
+        },
+        "required": ["query_text"]
+      },
+      "RecallAnswer": {
+        "type": "object",
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/RecalledRow" }
+          }
+        },
+        "required": ["rows"]
+      },
+      "HealthReport": {
+        "type": "object",
+        "description": "Liveness, cluster reachability, the capability record, and the mode flag. Reads no memory row.",
+        "properties": {
+          "status": { "type": "string", "enum": ["ok", "degraded"] },
+          "database_reachable": { "type": "boolean" },
+          "capabilities": { "type": "object", "description": "The capability record the store holds." },
+          "demo_mode": { "type": "boolean" },
+          "specification_present": { "type": "boolean" }
+        },
+        "required": ["status", "database_reachable", "demo_mode"]
+      },
+      "TierView": {
+        "type": "object",
+        "x-molt-view": "the Memory_Tier page",
+        "description": "One row per tier, each tier told apart by its own text label rather than by colour, plus the working tier's two expiry figures.",
+        "properties": {
+          "tiers": {
+            "type": "array",
+            "description": "The descriptive columns and the live count, one entry per tier.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tier": { "type": "string", "description": "The tier's text label." },
+                "purpose": { "type": "string", "description": "What the tier holds, in prose." },
+                "mutability": { "type": "string", "description": "Whether rows in the tier may change after they are written." },
+                "capability": { "type": "string", "description": "What the tier makes possible that the others do not." },
+                "retention": { "type": "string", "description": "How long a row survives in the tier, in prose." },
+                "live_rows": { "type": "integer", "description": "The count read live rather than cached." }
+              },
+              "required": ["tier", "purpose", "mutability", "capability", "retention", "live_rows"]
+            }
+          },
+          "working_expired_rows": {
+            "type": "integer",
+            "description": "Working tier rows past their expiry that the sweep has not yet removed."
+          },
+          "working_next_sweep_seconds": {
+            "type": "integer",
+            "description": "Seconds until the next working-tier sweep, as a duration rather than a wall reading."
+          }
+        },
+        "required": ["tiers", "working_expired_rows", "working_next_sweep_seconds"]
+      },
+      "RecalledRow": {
+        "type": "object",
+        "x-molt-row": "recalled",
+        "description": "One recalled prior attempt with its outcome and the confidence of the procedure it supports.",
+        "properties": {
+          "artifact_id": { "type": "string", "format": "uuid" },
+          "artifact_kind": { "type": "string" },
+          "distance": { "type": "number" },
+          "session_id": { "type": "string", "format": "uuid" },
+          "machine_id": { "type": "string" },
+          "occurred_at": { "type": "string", "format": "date-time" },
+          "outcome": { "type": "string" },
+          "kind": { "type": "string" },
+          "excerpt": { "type": "string" },
+          "confidence": { "type": "number" }
+        }
+      },
+      "LineageAncestorRow": {
+        "type": "object",
+        "x-molt-row": "lineage_node",
+        "description": "One ancestor of a named Artifact, reported with its kind.",
+        "properties": {
+          "artifact_id": { "type": "string", "format": "uuid" },
+          "artifact_kind": { "type": "string" }
+        }
+      },
+      "LineageDescendantRow": {
+        "type": "object",
+        "x-molt-row": "lineage_node",
+        "description": "One descendant of a named Artifact.",
+        "properties": {
+          "artifact_id": { "type": "string", "format": "uuid" }
+        }
+      },
+      "ResidueCandidateRow": {
+        "type": "object",
+        "x-molt-row": "residue_candidate",
+        "description": "One residue candidate with its distance, its band, and the recorded reason for its disposition.",
+        "properties": {
+          "artifact_id": { "type": "string", "format": "uuid" },
+          "artifact_kind": { "type": "string" },
+          "query_artifact_id": { "type": "string", "format": "uuid" },
+          "cosine_distance": { "type": "number" },
+          "band": { "type": "string" },
+          "included": { "type": "boolean" },
+          "decision_reason": { "type": "string" }
+        }
+      },
+      "ToolAnswer": {
+        "type": "object",
+        "description": "What one tool invocation produced. An unreachable cluster answers with no row and a note rather than by ending the session.",
+        "properties": {
+          "rows": { "type": "array", "items": { "type": "object" } },
+          "note": { "type": "string" }
+        },
+        "required": ["rows"]
+      },
+      "RenderedPage": {
+        "type": "string",
+        "contentMediaType": "text/html",
+        "description": "A rendered page whose view model is stated on the operation that serves it."
+      }
+    }
+  },
+  "paths": {
+    "/collector/events": {
+      "post": {
+        "operationId": "collectorEvents",
+        "summary": "Ingest one batch of Events, one record per line.",
+        "x-molt-surface": "collector",
+        "x-molt-path": "/events",
+        "x-molt-authentication": "bearer+signature",
+        "x-molt-mutation": true,
+        "security": [{ "bearerToken": [], "ingressSignature": [] }],
+        "requestBody": {
+          "required": true,
+          "description": "Newline-separated Event records. A record the reader refuses is reported rather than failing the batch.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string",
+                "description": "One Event document per line, each carrying its Session, its kind, and its body."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The batch was read and the readable records were persisted.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/EventBatchAccepted" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/collector/sessions/{session_id}": {
+      "put": {
+        "operationId": "collectorSession",
+        "summary": "Open or update one Session's metadata.",
+        "x-molt-surface": "collector",
+        "x-molt-path": "/sessions/{session_id}",
+        "x-molt-authentication": "bearer+signature",
+        "x-molt-mutation": true,
+        "security": [{ "bearerToken": [], "ingressSignature": [] }],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "description": "The Session this request declares.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/SessionMetadata" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The Session exists with the declared metadata.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SessionAccepted" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/collector/recall": {
+      "post": {
+        "operationId": "collectorRecall",
+        "summary": "Recall prior work semantically. Bearer only: it reads and writes nothing.",
+        "x-molt-surface": "collector",
+        "x-molt-path": "/recall",
+        "x-molt-authentication": "bearer",
+        "x-molt-mutation": false,
+        "security": [{ "bearerToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/RecallQuery" } }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The rows the query reached, bounded by the configured maximum.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/RecallAnswer" } }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/collector/health": {
+      "get": {
+        "operationId": "collectorHealth",
+        "summary": "Liveness and cluster reachability. Unauthenticated because it reads no table.",
+        "x-molt-surface": "collector",
+        "x-molt-path": "/health",
+        "x-molt-authentication": "none",
+        "x-molt-mutation": false,
+        "x-molt-request-shape": "empty",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The endpoint is live, with the reachability answer stated rather than implied.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/HealthReport" } }
+            }
+          },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/health": {
+      "get": {
+        "operationId": "consoleHealth",
+        "summary": "liveness, database reachability, capability record, and the mode flag",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "health",
+        "x-molt-path": "/health",
+        "x-molt-authentication": "none",
+        "x-molt-mutation": false,
+        "x-molt-request-shape": "empty",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The console is live. An unreachable cluster is reported as degraded rather than as a failure.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/HealthReport" } }
+            }
+          },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/spec": {
+      "get": {
+        "operationId": "consoleSpecification",
+        "summary": "the tracked Interface_Specification document, served verbatim",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "specification",
+        "x-molt-path": "/spec",
+        "x-molt-authentication": "none",
+        "x-molt-mutation": false,
+        "x-molt-request-shape": "empty",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "This document, byte for byte as it is tracked. No table is read and no memory content is returned.",
+            "content": {
+              "application/json": { "schema": { "type": "object", "description": "This document." } }
+            }
+          },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/login": {
+      "get": {
+        "operationId": "consoleLoginForm",
+        "summary": "the operator credential form",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "login_form",
+        "x-molt-path": "/login",
+        "x-molt-authentication": "none",
+        "x-molt-mutation": false,
+        "x-molt-request-shape": "empty",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "One labelled credential input and one submit control.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "post": {
+        "operationId": "consoleLoginSubmit",
+        "summary": "verify the operator credential and issue the session cookie",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "login_submit",
+        "x-molt-path": "/login",
+        "x-molt-authentication": "none",
+        "x-molt-mutation": false,
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": { "credential": { "type": "string" } },
+                "required": ["credential"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "The credential verified and a signed, absolutely expiring session cookie was issued.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/logout": {
+      "post": {
+        "operationId": "consoleLogout",
+        "summary": "revoke the session cookie",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "logout",
+        "x-molt-path": "/logout",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": true,
+        "security": [{ "consoleSession": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": { "csrf_token": { "type": "string" } },
+                "required": ["csrf_token"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "The session is revoked and the caller is returned to the credential form.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/": {
+      "get": {
+        "operationId": "consoleFleet",
+        "summary": "fleet overview of live Sessions",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "fleet",
+        "x-molt-path": "/",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "x-molt-request-shape": "empty",
+        "security": [{ "consoleSession": [] }],
+        "responses": {
+          "200": {
+            "description": "One row per live Session with its machine, its agent tool, and its Event count.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/sessions/{session_id}": {
+      "get": {
+        "operationId": "consoleSessionDetail",
+        "summary": "the Event stream of one Session with chain verification status",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "session_detail",
+        "x-molt-path": "/sessions/{session_id}",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Session's Events in order, with the recomputed chain status stated per Event.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/lineage": {
+      "get": {
+        "operationId": "consoleLineage",
+        "summary": "the Lineage_Graph view, filterable by Client",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "lineage",
+        "x-molt-path": "/lineage",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "client",
+            "in": "query",
+            "required": false,
+            "description": "Narrow the graph to one Client.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The graph with its nodes and edges, each edge naming its relation.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/lineage/{artifact_id}": {
+      "get": {
+        "operationId": "consoleLineageArtifact",
+        "summary": "the ancestor and descendant subgraph of one Artifact",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "lineage_artifact",
+        "x-molt-path": "/lineage/{artifact_id}",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Artifact's ancestors and descendants, each with its kind.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/residue": {
+      "get": {
+        "operationId": "consoleResidue",
+        "summary": "semantic residue search with cosine distances",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "residue",
+        "x-molt-path": "/residue",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          { "name": "client", "in": "query", "required": false, "schema": { "type": "string" } },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Rows asked for, held at or below the configured maximum.",
+            "schema": { "type": "integer" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The candidates with their distances and bands, as the residue policy classified them.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/sensitivity": {
+      "get": {
+        "operationId": "consoleSensitivity",
+        "summary": "the Threshold_Grid view of the Sensitivity_Analyzer report",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "sensitivity",
+        "x-molt-path": "/sensitivity",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          { "name": "client", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "One grid cell per threshold pair, each stating its counts.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/procedures": {
+      "get": {
+        "operationId": "consoleProcedures",
+        "summary": "Learned_Procedure standing with the change history per procedure",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "procedures",
+        "x-molt-path": "/procedures",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          { "name": "client", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Each procedure with its confidence, its standing, and the recorded changes behind it.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/tiers": {
+      "get": {
+        "operationId": "consoleTiers",
+        "summary": "the Memory_Tier view with live per-tier counts",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "tiers",
+        "x-molt-path": "/tiers",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "x-molt-request-shape": "empty",
+        "security": [{ "consoleSession": [] }],
+        "responses": {
+          "200": {
+            "description": "One row per tier with its descriptive columns and its live count, plus the working tier's expired-row count and the seconds until its next sweep.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/TierView" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/erase": {
+      "get": {
+        "operationId": "consoleEraseForm",
+        "summary": "the erasure console: Client picker, thresholds, dry-run toggle",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "erase_console",
+        "x-molt-path": "/erase",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "x-molt-request-shape": "empty",
+        "security": [{ "consoleSession": [] }],
+        "responses": {
+          "200": {
+            "description": "The form: a Client picker, the two thresholds, and the dry-run toggle.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "post": {
+        "operationId": "consoleEraseStart",
+        "summary": "record an Erasure_Run and return its identifier",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "erase_start",
+        "x-molt-path": "/erase",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": true,
+        "security": [{ "consoleSession": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "csrf_token": { "type": "string" },
+                  "client": { "type": "string" },
+                  "requester": { "type": "string" },
+                  "justification": { "type": "string" },
+                  "dry_run": { "type": "boolean" },
+                  "auto_include_threshold": { "type": "number" },
+                  "review_threshold": { "type": "number" }
+                },
+                "required": ["csrf_token", "client", "requester", "justification"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "The run is recorded and the caller is sent to its detail page.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/erase/{run_id}/stream": {
+      "get": {
+        "operationId": "consoleEraseStream",
+        "summary": "phase progress streamed from the durable phase and disposition rows",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "erase_stream",
+        "x-molt-path": "/erase/{run_id}/stream",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One event per phase transition, read from the durable rows rather than from process memory.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "phase": { "type": "string" },
+                    "state": { "type": "string" },
+                    "rows_affected": { "type": "integer" }
+                  },
+                  "required": ["phase", "state"]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/erase/{run_id}": {
+      "get": {
+        "operationId": "consoleEraseDetail",
+        "summary": "run detail with per-Artifact Dispositions",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "erase_detail",
+        "x-molt-path": "/erase/{run_id}",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run with its phases and one Disposition per Artifact, each naming its reason.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/erase/{run_id}/redactions/{artifact_id}": {
+      "get": {
+        "operationId": "consoleEraseRedaction",
+        "summary": "the before and after comparison of one Blended_Artifact body",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "erase_redaction",
+        "x-molt-path": "/erase/{run_id}/redactions/{artifact_id}",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          },
+          {
+            "name": "artifact_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The body as it stood and as it stands, with the redacted spans marked.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/certificates/{run_id}": {
+      "get": {
+        "operationId": "consoleCertificate",
+        "summary": "the certificate display",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "certificate",
+        "x-molt-path": "/certificates/{run_id}",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The certificate's counts, its named checkpoint, and its signature standing.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/certificates/{run_id}/verify": {
+      "post": {
+        "operationId": "consoleCertificateVerify",
+        "summary": "trigger a live verification and display the outcome",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "certificate_verify",
+        "x-molt-path": "/certificates/{run_id}/verify",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": true,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": { "csrf_token": { "type": "string" } },
+                "required": ["csrf_token"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The verification outcome, stated as passed or failed with the disagreeing figure named.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/retention": {
+      "get": {
+        "operationId": "consoleRetention",
+        "summary": "per-Client Jurisdiction, interval, and expiring and expired counts",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "retention",
+        "x-molt-path": "/retention",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          { "name": "client", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "One row per Client with its Jurisdiction, its interval, and its two counts.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/approvals": {
+      "get": {
+        "operationId": "consoleApprovals",
+        "summary": "the Approval_Queue list",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "approvals",
+        "x-molt-path": "/approvals",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": false,
+        "x-molt-request-shape": "empty",
+        "security": [{ "consoleSession": [] }],
+        "responses": {
+          "200": {
+            "description": "The queued approvals, each with what it would change and who asked.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/console/approvals/{approval_id}": {
+      "post": {
+        "operationId": "consoleApprovalResolve",
+        "summary": "resolve one queued approval",
+        "x-molt-surface": "console",
+        "x-molt-route-name": "approval_resolve",
+        "x-molt-path": "/approvals/{approval_id}",
+        "x-molt-authentication": "session",
+        "x-molt-mutation": true,
+        "security": [{ "consoleSession": [] }],
+        "parameters": [
+          {
+            "name": "approval_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "csrf_token": { "type": "string" },
+                  "decision": { "type": "string", "enum": ["approve", "reject"] }
+                },
+                "required": ["csrf_token", "decision"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "303": {
+            "description": "The approval is resolved and the queue is shown again.",
+            "content": { "text/html": { "schema": { "$ref": "#/components/schemas/RenderedPage" } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "501": { "$ref": "#/components/responses/NotImplemented" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/tools/molt.recall": {
+      "post": {
+        "operationId": "toolRecall",
+        "summary": "Recall prior attempts and their outcomes similar to a described action.",
+        "x-molt-surface": "tools",
+        "x-molt-tool-name": "molt.recall",
+        "x-molt-path": "/tools/molt.recall",
+        "x-molt-effect": "read_only",
+        "x-molt-authentication": "tool-session",
+        "x-molt-mutation": false,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query_text": {
+                    "type": "string",
+                    "x-molt-kind": "text",
+                    "description": "A natural-language description of the intended action."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "x-molt-kind": "count",
+                    "description": "How many rows to return, held at or below the configured maximum."
+                  }
+                },
+                "required": ["query_text"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The recalled rows, or no row and a note when the cluster did not answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rows": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/RecalledRow" }
+                    },
+                    "note": { "type": "string" }
+                  },
+                  "required": ["rows"]
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/tools/molt.lineage_ancestors": {
+      "post": {
+        "operationId": "toolLineageAncestors",
+        "summary": "Retrieve the lineage ancestors of the named Artifacts.",
+        "x-molt-surface": "tools",
+        "x-molt-tool-name": "molt.lineage_ancestors",
+        "x-molt-path": "/tools/molt.lineage_ancestors",
+        "x-molt-effect": "read_only",
+        "x-molt-authentication": "tool-session",
+        "x-molt-mutation": false,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "artifact_ids": {
+                    "type": "array",
+                    "items": { "type": "string", "format": "uuid" },
+                    "x-molt-kind": "identifier_list",
+                    "description": "The Artifacts whose ancestors are asked for."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "x-molt-kind": "count",
+                    "description": "How many rows to return, held at or below the configured maximum."
+                  }
+                },
+                "required": ["artifact_ids"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The permitted ancestors of the named Artifacts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rows": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/LineageAncestorRow" }
+                    },
+                    "note": { "type": "string" }
+                  },
+                  "required": ["rows"]
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/tools/molt.lineage_descendants": {
+      "post": {
+        "operationId": "toolLineageDescendants",
+        "summary": "Retrieve the lineage descendants of the named Artifacts.",
+        "x-molt-surface": "tools",
+        "x-molt-tool-name": "molt.lineage_descendants",
+        "x-molt-path": "/tools/molt.lineage_descendants",
+        "x-molt-effect": "read_only",
+        "x-molt-authentication": "tool-session",
+        "x-molt-mutation": false,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "artifact_ids": {
+                    "type": "array",
+                    "items": { "type": "string", "format": "uuid" },
+                    "x-molt-kind": "identifier_list",
+                    "description": "The Artifacts whose descendants are asked for."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "x-molt-kind": "count",
+                    "description": "How many rows to return, held at or below the configured maximum."
+                  }
+                },
+                "required": ["artifact_ids"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The permitted descendants of the named Artifacts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rows": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/LineageDescendantRow" }
+                    },
+                    "note": { "type": "string" }
+                  },
+                  "required": ["rows"]
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/tools/molt.residue_candidates": {
+      "post": {
+        "operationId": "toolResidueCandidates",
+        "summary": "Search residue candidates for one erasure run, recording nothing.",
+        "x-molt-surface": "tools",
+        "x-molt-tool-name": "molt.residue_candidates",
+        "x-molt-path": "/tools/molt.residue_candidates",
+        "x-molt-effect": "read_only",
+        "x-molt-authentication": "tool-session",
+        "x-molt-mutation": false,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "run_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "x-molt-kind": "identifier",
+                    "description": "The erasure run whose candidate set seeds the search."
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "x-molt-kind": "count",
+                    "description": "How many rows to return, held at or below the configured maximum."
+                  }
+                },
+                "required": ["run_id"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The candidates with their distances, their bands, and the reason recorded for each.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rows": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/ResidueCandidateRow" }
+                    },
+                    "note": { "type": "string" }
+                  },
+                  "required": ["rows"]
+                }
+              }
+            }
+          },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    }
+  }
+}
