@@ -1,0 +1,154 @@
+Description: >-
+  The bucket erasure certificates are written to. Object Lock is enabled at
+  creation because it can be enabled on no existing bucket, and the retention is
+  GOVERNANCE mode with a short interval so that teardown can release it and
+  complete without manual intervention. Nothing but certificates is written here:
+  no memory content, no vector, and no credential.
+
+Parameters:
+  DeploymentName:
+    Type: String
+    Description: Prefix the bucket name carries.
+    Default: molt
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+  CertificatePrefix:
+    Type: String
+    Description: Key prefix certificates are written under.
+    Default: certificates/
+  RetentionDays:
+    Type: Number
+    Description: >-
+      Retention interval applied to every certificate version. Short on purpose:
+      the lock is what makes a certificate immutable while it matters, and a long
+      interval would make the demonstration bucket undeletable.
+    Default: 1
+    MinValue: 1
+  CollectorExecutionRoleName:
+    Type: String
+    Description: Name of the ingest execution role, which reads nothing here.
+    Default: molt-collector-exec
+  ConsoleExecutionRoleName:
+    Type: String
+    Description: Name of the console execution role, which writes certificates.
+    Default: molt-console-exec
+  VerifierRoleName:
+    Type: String
+    Description: Name of the verifier role, which reads certificates.
+    Default: molt-verifier
+  PolicyLanguageVersion:
+    Type: String
+    Description: Edition of the access-policy language every policy document declares.
+    AllowedPattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+
+Resources:
+  CertificateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: "${DeploymentName}-certificates-${AWS::AccountId}-${AWS::Region}"
+      # Object Lock is declared at creation because it cannot be enabled on an
+      # existing bucket. Versioning is its prerequisite and is declared with it.
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days:
+              Ref: RetentionDays
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  CertificateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: CertificateBucket
+      PolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - Fn::GetAtt:
+                  - CertificateBucket
+                  - Arn
+              - Fn::Sub:
+                  - "${BucketArn}/*"
+                  - BucketArn:
+                      Fn::GetAtt:
+                        - CertificateBucket
+                        - Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          # An unencrypted write is refused rather than silently encrypted, so a
+          # caller that omits the requirement learns it did.
+          - Sid: DenyUnencryptedWrites
+            Effect: Deny
+            Principal: "*"
+            Action: s3:PutObject
+            Resource:
+              Fn::Sub:
+                - "${BucketArn}/*"
+                - BucketArn:
+                    Fn::GetAtt:
+                      - CertificateBucket
+                      - Arn
+            Condition:
+              StringNotEquals:
+                s3:x-amz-server-side-encryption: AES256
+          # Every principal outside the three named roles is denied outright, so
+          # the bucket's reachable set is the set the design names and not the set
+          # the account's other policies happen to allow.
+          - Sid: DenyEveryPrincipalOutsideTheNamedRoles
+            Effect: Deny
+            NotPrincipal:
+              AWS:
+                - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${ConsoleExecutionRoleName}"
+                - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${VerifierRoleName}"
+                - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${CollectorExecutionRoleName}"
+                - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: s3:*
+            Resource:
+              - Fn::GetAtt:
+                  - CertificateBucket
+                  - Arn
+              - Fn::Sub:
+                  - "${BucketArn}/*"
+                  - BucketArn:
+                      Fn::GetAtt:
+                        - CertificateBucket
+                        - Arn
+
+Outputs:
+  CertificateBucketName:
+    Description: Name of the certificate bucket.
+    Value:
+      Ref: CertificateBucket
+  CertificateBucketArn:
+    Description: Resource name of the certificate bucket.
+    Value:
+      Fn::GetAtt:
+        - CertificateBucket
+        - Arn
+  CertificatePrefixOut:
+    Description: The key prefix certificates are written under.
+    Value:
+      Ref: CertificatePrefix

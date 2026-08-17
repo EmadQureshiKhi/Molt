@@ -1,0 +1,186 @@
+Description: >-
+  Network foundation: one virtual network, public subnets only, and one security
+  group that declares no inbound rule at all. There is no address translation
+  gateway and no interface endpoint, because the tasks reach the cluster and the
+  cloud services outbound over the internet gateway and because both of those
+  resources carry an hourly charge the cost ceiling rules out.
+
+Parameters:
+  DeploymentName:
+    Type: String
+    Description: Prefix every resource name in this stack carries.
+    Default: molt
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+  VpcCidr:
+    Type: String
+    Description: Address range of the virtual network.
+    Default: 10.20.0.0/16
+  PublicSubnetACidr:
+    Type: String
+    Description: Address range of the first public subnet.
+    Default: 10.20.0.0/20
+  PublicSubnetBCidr:
+    Type: String
+    Description: Address range of the second public subnet.
+    Default: 10.20.16.0/20
+
+Resources:
+  # The network itself. Host names are resolved inside it so a task can reach the
+  # cluster by name, and nothing else about it is remarkable: it is a plain public
+  # network because every component here makes outbound calls and accepts none.
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock:
+        Ref: VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${DeploymentName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${DeploymentName}-igw"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: Vpc
+      InternetGatewayId:
+        Ref: InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock:
+        Ref: PublicSubnetACidr
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: ""
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${DeploymentName}-public-a"
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: Vpc
+      CidrBlock:
+        Ref: PublicSubnetBCidr
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: ""
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${DeploymentName}-public-b"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${DeploymentName}-public"
+
+  # The one route out. This is the whole reason the subnets are public: an
+  # outbound path that costs nothing per hour, in place of an address translation
+  # gateway that would cost per hour and per byte for traffic that only ever
+  # leaves.
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+
+  PublicSubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnetA
+      RouteTableId:
+        Ref: PublicRouteTable
+
+  PublicSubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnetB
+      RouteTableId:
+        Ref: PublicRouteTable
+
+  # The security group both long-running tasks run under. It declares no ingress
+  # property at all, which is stronger than declaring an empty one: there is no
+  # rule to widen and nothing listening to reach. Both tasks are reached by
+  # nobody; they hold outbound connections to the cluster and make outbound calls
+  # to the cloud services, and their health routes are read in-process.
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: >-
+        Outbound-only group for the long-running tasks; no inbound rule is
+        declared, so no traffic can reach a task.
+      VpcId:
+        Ref: Vpc
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Outbound calls to the cloud services and the model providers.
+        - IpProtocol: tcp
+          FromPort: 26257
+          ToPort: 26257
+          CidrIp: 0.0.0.0/0
+          Description: Outbound connections to the cluster.
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Sub: "${DeploymentName}-tasks"
+
+Outputs:
+  VpcId:
+    Description: Identifier of the virtual network.
+    Value:
+      Ref: Vpc
+    Export:
+      Name:
+        Fn::Sub: "${DeploymentName}-vpc-id"
+  PublicSubnetIds:
+    Description: The two public subnets the tasks run in.
+    Value:
+      Fn::Join:
+        - ","
+        - - Ref: PublicSubnetA
+          - Ref: PublicSubnetB
+    Export:
+      Name:
+        Fn::Sub: "${DeploymentName}-public-subnet-ids"
+  TaskSecurityGroupId:
+    Description: The outbound-only group with no inbound rule.
+    Value:
+      Ref: TaskSecurityGroup
+    Export:
+      Name:
+        Fn::Sub: "${DeploymentName}-task-security-group-id"

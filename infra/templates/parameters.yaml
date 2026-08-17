@@ -1,0 +1,180 @@
+Description: >-
+  The parameter names every component reads its secrets from, declared in the
+  standard tier, which carries no per-parameter monthly charge. No secret value
+  appears here and none is meant to: the template declares the name and a
+  placeholder, and the provisioning scripts write the real value straight from the
+  generator into the parameter, so a credential never passes through a template,
+  a parameter file, or a stack event.
+
+Parameters:
+  ParameterPrefix:
+    Type: String
+    Description: Hierarchy prefix every parameter name is declared under.
+    Default: /molt
+    AllowedPattern: "^/[a-z0-9./-]{1,64}$"
+  PlaceholderValue:
+    Type: String
+    Description: >-
+      Non-secret placeholder every declared parameter is created with. The
+      provisioning scripts replace it with the real value out of band, so the real
+      value reaches no template and no stack event.
+    Default: replace-out-of-band
+  IngressMaxAgeSeconds:
+    Type: Number
+    Description: Age beyond which a signed ingest request is refused.
+    Default: 300
+  MetricCardinalityMax:
+    Type: Number
+    Description: Ceiling on distinct billable metric-and-dimension combinations.
+    Default: 10
+
+Resources:
+  # One connection string per role, so a component holds the privileges of exactly
+  # one role and no component can borrow another's. The value written here is the
+  # placeholder; the role script writes the composed connection string.
+  WriterDsnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/store/dsn/writer"
+      Description: Connection string for the writer role the ingest path connects as.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  EraserDsnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/store/dsn/eraser"
+      Description: Connection string for the eraser role the console and the erasure path connect as.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  ReaderDsnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/store/dsn/reader"
+      Description: Connection string for the read-only role the verifier and the tool server connect as.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  WatcherDsnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/store/dsn/watcher"
+      Description: Connection string for the watcher role the policy watcher connects as.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  # The bearer token the ingest surface checks, and the shared secret the ingest
+  # signature is keyed with. The second exists because a bearer token alone
+  # proves possession of a token and nothing about the body it arrived with.
+  CollectorTokenParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/collector/token"
+      Description: Bearer token the ingest surface requires of every caller.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  IngressSigningSecretParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/collector/ingress-secret"
+      Description: Shared secret the ingest request signature is keyed with.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  ConsoleCredentialParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/console/credential"
+      Description: Access credential the console requires of an operator.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  ConsoleSessionKeyParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/console/session-key"
+      Description: Key the console signs its session material with.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  EmbeddingCredentialParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/providers/embedding-credential"
+      Description: Credential for the configured embedding provider.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  TextCredentialParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/providers/text-credential"
+      Description: Credential for the configured text provider.
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: PlaceholderValue
+
+  # Two settings rather than secrets, kept beside the names above so a component
+  # reads its whole configuration from one hierarchy.
+  IngressMaxAgeParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/collector/ingress-max-age-seconds"
+      Description: Age beyond which a signed ingest request is refused, bounding replay.
+      Type: String
+      Tier: Standard
+      Value:
+        Fn::Sub: "${IngressMaxAgeSeconds}"
+
+  MetricCardinalityParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: "${ParameterPrefix}/telemetry/metric-cardinality-max"
+      Description: Ceiling on distinct billable metric-and-dimension combinations.
+      Type: String
+      Tier: Standard
+      Value:
+        Fn::Sub: "${MetricCardinalityMax}"
+
+Outputs:
+  ParameterPrefixOut:
+    Description: The hierarchy prefix every component resolves its parameter names under.
+    Value:
+      Ref: ParameterPrefix
+  IngressSigningSecretName:
+    Description: Name of the parameter holding the ingest signing secret.
+    Value:
+      Ref: IngressSigningSecretParameter

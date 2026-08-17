@@ -1,0 +1,120 @@
+Description: >-
+  The asymmetric signing key certificates and ledger checkpoints are signed with.
+  The signing operation is granted to exactly one principal, the console execution
+  role, and is denied to every other principal including the account
+  administrative path. That exclusivity is the reason the checkpoint signer is
+  hosted inside the console function rather than in a task of its own: a second
+  signing principal would end it.
+
+Parameters:
+  DeploymentName:
+    Type: String
+    Description: Prefix the key alias carries.
+    Default: molt
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+  ConsoleExecutionRoleName:
+    Type: String
+    Description: >-
+      Name of the console execution role, which is the one principal permitted to
+      sign. The console stack declares that role under this same name, so this stack
+      names it without depending on it.
+    Default: molt-console-exec
+  VerifierRoleName:
+    Type: String
+    Description: Name of the verifier role, which may read the public key and no more.
+    Default: molt-verifier
+  PolicyLanguageVersion:
+    Type: String
+    Description: Edition of the access-policy language every policy document declares.
+    AllowedPattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+
+Resources:
+  SigningKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: >-
+        Asymmetric signing key for erasure certificates and ledger checkpoints.
+        Digests are signed rather than payloads, so one call covers a run.
+      KeySpec: ECC_NIST_P256
+      KeyUsage: SIGN_VERIFY
+      MultiRegion: false
+      EnableKeyRotation: false
+      KeyPolicy:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          # The administrative statement deliberately omits the signing
+          # operation. An administrator can delete this key, which is a different
+          # power from being able to sign with it, and the externally verifiable
+          # checkpoint is the answer to a hostile administrator rather than a
+          # policy statement.
+          - Sid: AdministrationWithoutSigning
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: "*"
+          - Sid: ConsoleExecutionRoleMaySign
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${ConsoleExecutionRoleName}"
+            Action:
+              - kms:Sign
+              - kms:GetPublicKey
+            Resource: "*"
+          - Sid: VerifierRoleMayReadPublicKey
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${VerifierRoleName}"
+            Action:
+              - kms:GetPublicKey
+            Resource: "*"
+          # The exclusivity, stated rather than implied. Every principal other
+          # than the console execution role is denied the signing operation, so
+          # the administrative statement above cannot be widened into a second
+          # signing principal by adding an action to it.
+          - Sid: NoOtherPrincipalMaySign
+            Effect: Deny
+            NotPrincipal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${ConsoleExecutionRoleName}"
+            Action:
+              - kms:Sign
+            Resource: "*"
+
+  SigningKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName:
+        Fn::Sub: "alias/${DeploymentName}-signing"
+      TargetKeyId:
+        Ref: SigningKey
+
+Outputs:
+  SigningKeyId:
+    Description: Identifier of the signing key the certificate builder names.
+    Value:
+      Ref: SigningKey
+  SigningKeyArn:
+    Description: Resource name of the signing key, for the console role's policy.
+    Value:
+      Fn::GetAtt:
+        - SigningKey
+        - Arn
