@@ -1,0 +1,47 @@
+-- The eraser's delete on the three cascading children of a Learned_Procedure, and the
+-- correction of a claim migration 020 made about why they were not needed.
+--
+-- 020 granted the eraser SELECT on `procedure_retrieval`, `procedure_outcome`, and
+-- `procedure_confidence_change`, and argued at length that SELECT was the whole of what the
+-- erasure path needed on them. The argument was that each references the Learned_Procedure
+-- it belongs to with a cascading delete, so removing the procedure removes them with it,
+-- and that a cascade is performed by the constraint rather than by the deleting session, so
+-- no delete privilege is consulted for it.
+--
+-- The second half of that is false on this platform, and the cluster says so in as many
+-- words. A run reached its hard-delete step, removed the artifacts it was authorised to
+-- remove, and stopped on:
+--
+--   InsufficientPrivilege: while building cascade expression: user molt_eraser_svc does not
+--   have DELETE privilege on relation procedure_retrieval
+--
+-- The privilege is consulted while the cascade expression is *built*, which is to say the
+-- deleting session must itself hold the delete on every table the cascade will reach. So a
+-- cascading reference does not narrow what a role needs; it widens it, to the transitive
+-- closure of the children of everything the role deletes.
+--
+-- That makes this the correction to 020, and it is a new file rather than an edit for the
+-- reason the runner enforces: a digest is recorded per applied migration and a re-run
+-- refuses when one stops matching, so the prose of an applied file stands as written and is
+-- corrected where a reader will next look. 020's grants were right and its reasoning about
+-- them was wrong, which is worth keeping visible: the grant list it wrote was correct only
+-- until a run got far enough to need the rest.
+--
+-- Which tables, derived rather than guessed. Every cascading child of every table the
+-- erasure path deletes was enumerated against the cluster. The path deletes `ledger`,
+-- `session`, `derived_artifact`, `embedding`, `lineage_edge`, `client_binding`, and
+-- `working_memory`. Five children cascade from those: `lineage_edge` and `working_memory`,
+-- which the eraser could already delete, and these three, which it could not. So this file
+-- closes the whole class rather than the one table the run happened to name first — the
+-- other two would have failed on the next statement.
+--
+-- DELETE and nothing further. The eraser already reads all three and has no reason to write
+-- one, and an insert here belongs to the recall path that records a retrieval, an outcome,
+-- and a movement in confidence.
+--
+-- No guard is needed for re-runnability. A repeated GRANT on this platform is re-issuable
+-- with no effect the second time, so applying this file twice leaves the same privileges
+-- the first application left.
+
+GRANT DELETE ON TABLE procedure_retrieval, procedure_outcome, procedure_confidence_change
+    TO molt_eraser;

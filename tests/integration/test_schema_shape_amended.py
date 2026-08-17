@@ -54,12 +54,40 @@ from molt.store.migrate import MigrationReport, apply_migrations
 
 pytestmark = pytest.mark.integration
 
-# The versions the second generation is made of, in application order. The last three
-# of them are second-generation amendments for the same reason the rest are, none of
-# them creating a table of its own: one adds columns to a table an earlier generation
-# created, one grants the read-only role two reads an earlier grant list omitted, and
-# one removes three references an authorised erasure has to be able to cut.
-SECOND_GENERATION_VERSIONS: Final[tuple[int, ...]] = (8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+# The versions the second generation is made of, in application order. Several of them
+# create no table of their own and are amendments to what an earlier generation laid
+# down: one adds columns to an existing table, one removes three references an
+# authorised erasure has to be able to cut, and the rest grant a role a privilege an
+# earlier grant list omitted.
+#
+# Those grant amendments all have one cause. The suite applies migrations under an
+# administrative login, and an administrative login holds every privilege there is, so a
+# missing grant is invisible here and becomes load-bearing only where a path runs as the
+# narrow role its privileges were written for. Each was found that way: a reader view
+# that could not count, a watcher that died before its loop on the capability write its
+# start-up probe performs, an erasure that stopped in its disposition phase on the
+# procedural reads that weigh a Learned_Procedure, an erasure sweep that removed a
+# Session's Events and then could not remove the Session, a change stream that was refused
+# for want of a read on one of the two tables it names, and a delete refused while its
+# cascade expression was built because the deleting role could not delete a table three
+# references away.
+SECOND_GENERATION_VERSIONS: Final[tuple[int, ...]] = (
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+)
 
 # The tenant row the first migration reserves, used as the owner of every row the
 # behavioural assertions below write.

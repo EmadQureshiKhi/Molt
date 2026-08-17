@@ -1,0 +1,33 @@
+-- The three procedural-memory reads the erasure path performs, and the eraser role was
+-- never granted any of them.
+--
+-- Deciding what to do with a Learned_Procedure consults its standing, and its standing is
+-- derived from how often it was retrieved and how those Sessions turned out. So the
+-- disposition phase reads the retrieval table, the outcome table, and the confidence-change
+-- table for the procedures belonging to the tenant being erased. The roles migration
+-- granted all three to the read-only role and to the writer, and to the eraser it granted
+-- none, so an erasure reached its disposition phase and stopped there on a missing
+-- privilege.
+--
+-- Why it took a deployment to find, when the erasure path has end-to-end coverage: that
+-- coverage runs as an administrative login against a schema of its own, and an
+-- administrative login holds every privilege there is. The grants only become load-bearing
+-- when the path runs as the role its privileges were written for, and the first place that
+-- happened was a run performed against a deployed cluster. It is the same shape as the two
+-- reader-grant omissions before it and the watcher's capability write: a role narrower than
+-- the test harness is the thing that exposes a missing grant.
+--
+-- SELECT and nothing further, on all three, and the reason is worth stating because a
+-- reader might reasonably expect an erasure to need to delete these rows. It does not. Each
+-- of the three references the Learned_Procedure it belongs to with a cascading delete, so
+-- removing the procedure removes them with it, and a cascade is performed by the constraint
+-- rather than by the deleting session — no delete privilege is consulted for it. Granting
+-- delete here would therefore widen the eraser's reach without enabling anything, which is
+-- exactly the kind of grant that is impossible to argue away later.
+--
+-- No guard is needed for re-runnability. A repeated GRANT on this platform is re-issuable
+-- with no effect the second time, so applying this file twice leaves the same privileges
+-- the first application left.
+
+GRANT SELECT ON TABLE procedure_retrieval, procedure_outcome, procedure_confidence_change
+    TO molt_eraser;

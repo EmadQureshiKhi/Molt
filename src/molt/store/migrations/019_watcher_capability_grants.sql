@@ -1,0 +1,41 @@
+-- The one write the policy watcher performs before it does any work, and the watcher
+-- role was never granted.
+--
+-- The watcher probes whether this cluster serves a sinkless change stream and records
+-- the answer, because that answer decides which of its two paths it runs: the change
+-- stream when the cluster serves one, a polling fallback when it does not. The record
+-- is written to the capability table, and the roles migration granted that table to
+-- the read-only role and to the eraser and to no one else. So the watcher connected,
+-- resolved its own connection string, probed, and died on a missing privilege before
+-- reaching its loop -- on every deployment, at every start, because the probe is not
+-- conditional and the grant was never there.
+--
+-- The failure was invisible until the watcher ran somewhere it could not be restarted
+-- by hand. Its own least-privilege connection is what exposed it: a run under a wider
+-- login writes the row and notices nothing, and the deployed service is the first
+-- place the watcher connected as the role its grants were actually written for. The
+-- service reported it as a task that started and stopped, once a minute, which names
+-- neither the table nor the privilege.
+--
+-- Three privileges, and each is needed rather than granted for symmetry. The write is
+-- an upsert, so it inserts a row for a fact recorded for the first time and updates
+-- the row for a fact recorded again -- a capability row answers what this cluster does
+-- now, so a second probe replaces the first answer rather than appending to it, and
+-- that is one statement needing both. SELECT is the third because reading the record
+-- is what the watcher does with it: every component reads the capability record once
+-- at process start and branches on it, so a watcher that could write the row and not
+-- read it back would still be unable to choose its path.
+--
+-- The scope stops at this table. The watcher's other privileges are unchanged, and in
+-- particular this grants nothing on the ledger or on any tenant's rows: the watcher
+-- reads sessions and writes policy outcomes, and the ability to record a platform fact
+-- about the cluster is not an ability to record anything about a client. Nor is the
+-- grant widened to the other roles that probe. The capability probe script runs under
+-- an administrative connection by design, because it is an operator action rather than
+-- a component's, so it needs nothing here.
+--
+-- No guard is needed for re-runnability. A repeated GRANT on this platform is
+-- re-issuable with no effect the second time, so applying this file twice leaves the
+-- same privileges the first application left.
+
+GRANT SELECT, INSERT, UPDATE ON TABLE capability TO molt_watcher;

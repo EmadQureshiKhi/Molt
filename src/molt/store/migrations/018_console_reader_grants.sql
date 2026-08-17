@@ -1,0 +1,69 @@
+-- The five reads the console's read-only views perform and the read-only role was
+-- never granted.
+--
+-- This is the same class of omission the reader-grants migration before this one
+-- corrected, found the same way and in two more places. The roles migration granted
+-- the tables the read-only paths were known to read when it was written, the grants
+-- migration added the tables the second generation created, and a table that only a
+-- console view reads fell between them. Every view named below therefore fails on a
+-- missing privilege in any deployment that configures a read-only connection, which
+-- the delivered console stack does. This file grants exactly those five reads and
+-- nothing else.
+--
+-- Two views are affected, and both of them are views a reviewer opens rather than
+-- paths an operator could route around.
+--
+-- The first is the memory-tier view. It reports one row per tier with that tier's
+-- live row count read at request time, which is the whole point of it: the taxonomy
+-- is meant to be observable against the cluster rather than merely documented, and a
+-- cached or precomputed count would make the page decorative. Its counting statement
+-- for the action tier sums nine tables, two of which are the erasure request and the
+-- backup record, and its statement for the working tier counts the working-memory
+-- table, reads that table's expired rows against the cluster's own current
+-- timestamp, and reads that table's own stored definition back to report when the
+-- expiry job next runs. So three of the tables it counts were unreachable to it. The
+-- view takes the read-only connection deliberately, because a page that reports row
+-- counts must not hold a handle that could change them, and it is available in the
+-- read-only demonstration mode, which is the configuration a public reviewer sees.
+--
+-- The second is the approval queue. It lists the pending human decisions the policy
+-- watcher raised, and its statement reads the queue joined to the rule that raised
+-- each entry, so both of those tables were unreachable. The listing takes the
+-- read-only connection while the resolution beside it keeps the writing one, which
+-- is the split that makes the listing's read-only posture a privilege the connection
+-- holds rather than a habit of the module -- and that split is exactly what turned
+-- the missing grant into a failure, because before it the listing borrowed a handle
+-- that happened to be allowed.
+--
+-- SELECT and nothing further, on all five. The point of this role is that it cannot
+-- write, and the working-memory table makes that worth restating rather than
+-- assuming: the tier the reader is now allowed to count is the one tier whose rows
+-- are freely overwritten, so a grant of anything beyond SELECT here would hand a
+-- read-only path the ability to disturb the very numbers it exists to report. The
+-- queue is the sharper case. An approval is a record of a human decision, and the
+-- role that renders the queue must not be able to answer an entry; resolving one
+-- stays with the writing role, and this grant deliberately does not widen that.
+--
+-- No guard is needed for re-runnability. A repeated GRANT on this platform is
+-- re-issuable with no effect the second time, so applying this file twice leaves the
+-- same privileges the first application left.
+--
+-- One correction this file carries rather than makes, because it cannot be made
+-- where the claim is written. The roles migration and the grants migration both
+-- describe the read-only role as the role backing the auditor views. It does not.
+-- The provisioning script creates a schema per auditor, defines that auditor's views
+-- in it filtered to that auditor's own tenant, and grants SELECT on those views
+-- directly to that auditor's own database login; it grants the read-only role to no
+-- auditor and never has. The difference is not cosmetic and the narrower shape is
+-- the deliberate one: an auditor is an untrusted third party acting for one
+-- departing tenant, and granting it this role would widen its reach to everything
+-- this role can read across every tenant, where the per-auditor grant reaches one
+-- tenant's four views and stops. Those two files cannot be edited to say so -- the
+-- runner records a digest per applied file and refuses to run when a recorded digest
+-- stops matching, so editing either would break every database that has already
+-- applied it -- and this file is the first later migration to touch the read-only
+-- role's grants, which makes it the right place to record the correction. The
+-- glossary and the auditor guide state the delivered arrangement.
+
+GRANT SELECT ON TABLE working_memory, erasure_request, backup_record,
+    approval_queue, policy_rule TO molt_reader;

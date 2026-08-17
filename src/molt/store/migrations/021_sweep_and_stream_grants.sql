@@ -1,0 +1,55 @@
+-- Two roles, three grants: the session the erasure sweep deletes, and the two tables the
+-- watcher's change stream cannot be opened without.
+--
+-- These were found by asking the cluster rather than by reading the grant lists. A scan of
+-- the catalogue tells you what a role holds; it does not tell you whether the statements a
+-- path issues are the statements the scan recognised. So each candidate here was put to the
+-- deployed cluster as the role, with the statement the path actually runs, inside a
+-- transaction that was rolled back. Three came back refused. A fourth looked like a gap and
+-- is not one, and saying which is part of the record.
+--
+-- The eraser's delete of a Session. The disposition sweep removes a Session's Events and
+-- then the Session itself, in that order, because `ledger` references `session` with no
+-- action rather than with a cascade: the child rows must be gone before the parent can be.
+-- The eraser held SELECT and UPDATE on `session` and no DELETE, so the sweep removed every
+-- Event of a Session and then stopped on the row that Session is. Nothing guards the delete
+-- once the privilege is there: the session guard is attached BEFORE UPDATE and a delete
+-- consults it not at all. `working_memory` references `session` with a cascade, so the
+-- scratch rows of a deleted Session go with it and no further privilege is consulted for
+-- them.
+--
+-- The watcher's two reads, which are one mechanism. The change stream is opened over
+-- `ledger` and `derived_artifact`, and this platform serves a core changefeed only to a
+-- principal holding SELECT on every table named in it. The watcher held SELECT on `ledger`
+-- and nothing at all on `derived_artifact`, so the statement was refused for as long as it
+-- has existed. The refusal is caught, recorded as a capability, counted, and persisted, and
+-- the timestamp poll took over — which is why nothing ever failed loudly. The watcher was
+-- running in its degraded mode on a cluster that serves the stream perfectly well, and the
+-- three places that record the degradation all faithfully said so to nobody in particular.
+--
+-- `lineage_edge` is the second half of the same mechanism. A `derived_artifact` row carries
+-- no Session, so an artifact mutation arriving on the stream is attributed by reading the
+-- earliest lineage edge that names a Session, or that names an Event whose Session answers
+-- for it. That read is reached only from the stream path, so it could not have been refused
+-- while the stream itself was refused first. Granting the stream without it would move the
+-- failure one step later rather than removing it, which is the reason both are here and in
+-- one file.
+--
+-- SELECT and nothing further for the watcher, on both. It writes no memory content, and
+-- reading an artifact to attribute it is the whole of what it does with either table.
+--
+-- The apparent fourth gap, recorded because it will be found again. The writer's path
+-- reads the capability record and the writer is granted no read of it. That is deliberate
+-- and already stated where the read happens: the attempt is best-effort, a failure is
+-- logged at debug and swallowed, and every accessor then reports each platform fact as
+-- unprobed rather than as absent. An empty record is the honest reading when the role that
+-- looked is not allowed to look. Granting the read would widen the ingest role for a value
+-- the ingest path is written to do without, so it is not granted here.
+--
+-- No guard is needed for re-runnability. A repeated GRANT on this platform is re-issuable
+-- with no effect the second time, so applying this file twice leaves the same privileges
+-- the first application left.
+
+GRANT DELETE ON TABLE session TO molt_eraser;
+
+GRANT SELECT ON TABLE derived_artifact, lineage_edge TO molt_watcher;
