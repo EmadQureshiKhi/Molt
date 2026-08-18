@@ -1,0 +1,106 @@
+{#
+  The retention view.
+
+  One table row per permitted Client, each carrying its Jurisdiction, the interval its
+  regime resolves to, the count expiring inside the reporting window, and the count
+  already expired. Both counts are taken against one reading, so the two figures on a
+  row describe the same present. Every figure carries a column header in both
+  directions, and a Client the report answered no line for renders that absence in
+  words rather than as a row of zeros.
+
+  The Client filter is a GET form: it narrows the roster and carries no mutation, so it
+  needs no token.
+#}
+{% extends "base.html" %}
+
+{% block standfirst %}
+  <p class="standfirst">
+    The retention regime each permitted Client resolves to, with what is expiring soon and what has already expired. Both counts are taken against one reading, so the two figures on a row describe the same instant.
+  </p>
+{% endblock %}
+
+{% block content %}
+  <p>
+    Retention is the cluster's own. Every content row carries the instant it stops being
+    live, and the cluster removes expired rows on its own schedule, so the counts below
+    describe what is stored rather than what any process here remembers. Both counts are
+    taken against one reading of the present.
+  </p>
+
+  {% if fallback_interval %}
+    <p>
+      A Client whose Jurisdiction names no interval keeps content for
+      {{ fallback_interval.days }} day(s)
+      ({{ fallback_interval.total_seconds()|int }} second(s)), which is the configured
+      default the write paths apply.
+    </p>
+  {% endif %}
+
+  <form method="get" action="/retention">
+    <p>
+      <label for="retention-client">Client name</label>
+      <input
+        id="retention-client"
+        type="text"
+        name="{{ client_field }}"
+        value="{{ chosen.slug if chosen else '' }}"
+        autocomplete="off"
+      />
+      <button type="submit">Show this Client</button>
+    </p>
+  </form>
+
+  {% if not filter_recognised %}
+    <p role="status">That name matches no permitted Client, so no regime is shown.</p>
+  {% endif %}
+
+  {% if notice %}
+    <p role="status">{{ notice }}</p>
+  {% endif %}
+
+  {% if rows %}
+    <table>
+      <caption>
+        Retention per Client. The expiring column counts rows whose expiry falls inside
+        the next {{ window_days }} day(s); the expired column counts rows already past
+        their expiry and awaiting the cluster's next sweep.
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Client</th>
+          <th scope="col">Jurisdiction</th>
+          <th scope="col">Retention interval</th>
+          <th scope="col">Expiring within {{ window_days }} day(s)</th>
+          <th scope="col">Already expired</th>
+          <th scope="col">Expiry of content written at this reading</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <th scope="row">{{ row.client.label }} ({{ row.client.slug }})</th>
+            {% if row.line %}
+              <td>{{ row.jurisdiction }}</td>
+              <td>
+                {{ row.interval.days }} day(s)
+                ({{ row.interval.total_seconds()|int }} second(s))
+              </td>
+              <td>{{ row.expiring_soon }}</td>
+              <td>{{ row.already_expired }}</td>
+              <td>{{ row.expiry_of_a_write_now }}</td>
+            {% else %}
+              <td colspan="5">{{ no_line_notice }}</td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <p>
+      An expired row is one the cluster may remove rather than one
+      it has already removed: the sweep runs on its own schedule, so a positive expired
+      count is a report of the interval between expiry and removal rather than of
+      content retained past its regime.
+    </p>
+  {% endif %}
+{% endblock %}

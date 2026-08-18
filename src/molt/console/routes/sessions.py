@@ -96,14 +96,18 @@ def detail_of(
     no row in any of these reads.
     """
     for choice in roster:
-        record = session_of_client(console.store, session_id, choice.id)
+        record = session_of_client(console.read_only_store(), session_id, choice.id)
         if record is None:
             continue
         return SessionDetail(
             client=choice,
             session=record,
-            events=events_of_session(console.store, session_id, choice.id, limit=EVENTS_LIMIT),
-            children=child_sessions(console.store, session_id, choice.id, limit=CHILDREN_LIMIT),
+            events=events_of_session(
+                console.read_only_store(), session_id, choice.id, limit=EVENTS_LIMIT
+            ),
+            children=child_sessions(
+                console.read_only_store(), session_id, choice.id, limit=CHILDREN_LIMIT
+            ),
             report=chain_status(console, session_id),
         )
     return None
@@ -117,7 +121,7 @@ def chain_status(console: Console, session_id: UUID) -> ChainReport | None:
     decides what a caller may see.
     """
     try:
-        return verify_chain(console.store, session_id)
+        return verify_chain(console.read_only_store(), session_id)
     except Exception as error:
         log(
             Severity.WARNING,

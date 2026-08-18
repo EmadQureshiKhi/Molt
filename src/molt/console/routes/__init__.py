@@ -14,12 +14,14 @@ silent one.
 from __future__ import annotations
 
 from molt.console.routes import (
+    approvals,
     certificates,
     erasure,
     fleet,
     lineage,
     procedures,
     residue,
+    retention,
     runs,
     sensitivity,
     sessions,
@@ -27,12 +29,14 @@ from molt.console.routes import (
 )
 
 __all__: list[str] = [
+    "approvals",
     "certificates",
     "erasure",
     "fleet",
     "lineage",
     "procedures",
     "residue",
+    "retention",
     "runs",
     "sensitivity",
     "sessions",

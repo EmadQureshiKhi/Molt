@@ -106,14 +106,42 @@ _DEFAULT_HOST: Final[str] = "127.0.0.1"
 _DEFAULT_PORT: Final[int] = 8080
 
 
+# How far above this module the asset root may sit, in the layouts this package is run
+# from. A checkout keeps the package under a source directory, so the root is three
+# levels up; a deployment archive holds the package at its own root, so it is two. The
+# candidates are ordered outermost first, and each is tested by whether it actually holds
+# the templates rather than assumed from the count.
+_ROOT_DEPTHS: Final[tuple[int, ...]] = (3, 2)
+
+
 def web_root() -> Path:
-    """The repository root the web assets are resolved against.
+    """The root the web assets are resolved against, in whichever layout is running.
 
     Derived from this module's own location rather than from the working directory,
-    because a function invocation and a local run have different working
-    directories and the assets sit at a fixed place relative to the package.
+    because a function invocation and a local run have different working directories.
+    What cannot be derived from the location alone is *how far up* the root sits: a
+    checkout has the package under a source directory and a deployment archive has it at
+    the archive's own root, one level shallower, so a single fixed count is right in one
+    layout and points above the root in the other.
+
+    It pointed above the root in the deployed one. Every page of the console answered
+    that its templates were unavailable, because the count that is correct for a checkout
+    resolved to the filesystem root inside a function. So each candidate is tested by
+    whether the templates are actually there, and the first that holds them wins. The
+    outermost is tried first so a checkout keeps resolving to the repository root exactly
+    as before.
+
+    Falling back to the outermost candidate when none holds the templates keeps the
+    failure the one it was: a console reporting that its assets are missing, from the
+    place they were expected, rather than a resolver raising somewhere further from the
+    cause.
     """
-    return Path(__file__).resolve().parents[3]
+    here = Path(__file__).resolve()
+    for depth in _ROOT_DEPTHS:
+        candidate = here.parents[depth]
+        if (candidate / DEFAULT_TEMPLATE_PATH).is_dir():
+            return candidate
+    return here.parents[_ROOT_DEPTHS[0]]
 
 
 def _split_bind(text: str) -> tuple[str, int]:
@@ -351,6 +379,29 @@ class Console:
             database_role=opened.role,
         )
         return opened
+
+    def read_only_store(self) -> MemoryStore:
+        """The narrowest handle available to a view that only reads.
+
+        Every view that registers no mutation route reaches its store through this
+        rather than through `store`, so least privilege is the default a new read-only
+        view inherits instead of a choice each one makes again. Where a read-only
+        connection is configured this is that connection, and the reads a view issues
+        are ones the cluster would refuse to let write.
+
+        Unlike `reader_store` this does not refuse when none is configured: it answers
+        with the primary handle instead. The difference is whose requirement is being
+        served. The Sensitivity_Analyzer refuses a wider role itself, so an analysis run
+        on a wider handle would be a false claim and is better reported as unavailable.
+        A fleet listing makes no such claim, and a single-connection deployment — a
+        local run, or a demonstration with one connection string — would lose the view
+        entirely for a privilege it never depended on. The handle returned reports its
+        own role, so a caller that needs to state which one it read with can.
+        """
+        try:
+            return self.reader_store()
+        except ReaderRoleUnavailableError:
+            return self._store
 
     @property
     def demo_mode(self) -> bool:

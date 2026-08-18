@@ -156,7 +156,7 @@ async def procedures_view(request: Request) -> Response:
         "notice": None,
     }
     try:
-        context["rows"] = procedure_rows(console_of(request).store, policy=policy)
+        context["rows"] = procedure_rows(console_of(request).read_only_store(), policy=policy)
     except MoltError as error:
         log(
             Severity.INFO,

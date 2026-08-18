@@ -14,7 +14,7 @@ is what makes the table's answer the deployed answer: a route reachable in the
 application but absent here cannot exist, because `build_routes` is the only thing
 that constructs Starlette routes.
 
-Three invariants are checked at import rather than left to review:
+Four invariants are checked at import rather than left to review:
 
 1. Only names in `PUBLIC_ROUTE_NAMES` may declare public access. A new route is
    authenticated by default, and making one public is an edit to an allowlist that
@@ -23,6 +23,11 @@ Three invariants are checked at import rather than left to review:
    failure mode the whole posture exists to prevent.
 3. Route names are unique, because the demonstration denylist, the handler
    registry, and the CSRF classification are all keyed by name.
+4. A route that declares `mutation=True` declares `BLOCKED`. A demonstration is
+   obliged to expose no mutation route at all, so the disposition a mutating route
+   may carry is the refusing one and there is no second reading of the table: the
+   denylist and the mutation set are the same set by construction rather than by
+   two derivations that could drift.
 
 Handlers are attached by name through `HANDLERS`. That indirection is what lets
 the view tasks add a handler module without touching the table, and lets the table
@@ -81,7 +86,14 @@ class DemoDisposition(StrEnum):
 
     Classification is by route name rather than by method, so a route added later
     is blocked until it is classified here (Requirement 25.12). `BLOCKED` is the
-    denylist the demonstration middleware of task 26.6 rejects on.
+    denylist the demonstration middleware rejects on, and every route declaring
+    `mutation=True` is required to declare it: a demonstration exposes no mutation
+    route, so a mutating route carrying `READ_ONLY` or `HIDDEN` is a table the
+    import-time check refuses rather than a route the mode dispatches.
+
+    The other three are rendering decisions. `VISIBLE` and `READ_ONLY` are offered
+    in the navigation and reachable; `HIDDEN` is reachable and not linked, which is
+    what keeps `GET /erase` observable with its controls disabled (Requirement 25.5).
     """
 
     VISIBLE = "visible"
@@ -164,7 +176,7 @@ _DECLARED_ROUTES: Final[tuple[RouteSpec, ...]] = (
         method="POST",
         path="/logout",
         access=Access.SESSION,
-        demo=DemoDisposition.HIDDEN,
+        demo=DemoDisposition.BLOCKED,
         mutation=True,
         summary="revoke the session cookie",
     ),
@@ -299,7 +311,7 @@ _DECLARED_ROUTES: Final[tuple[RouteSpec, ...]] = (
         method="POST",
         path="/certificates/{run_id}/verify",
         access=Access.SESSION,
-        demo=DemoDisposition.READ_ONLY,
+        demo=DemoDisposition.BLOCKED,
         mutation=True,
         summary="trigger a live verification and display the outcome",
     ),
@@ -349,6 +361,12 @@ def _validated(table: tuple[RouteSpec, ...]) -> tuple[RouteSpec, ...]:
             raise RouteTableError(
                 f"the route {spec.name!r} is public and mutating, which no route may be"
             )
+        if spec.mutation and spec.demo is not DemoDisposition.BLOCKED:
+            raise RouteTableError(
+                f"the route {spec.name!r} mutates and declares the demonstration "
+                f"disposition {spec.demo.value!r}, where a mutating route may only "
+                "declare blocked: a demonstration exposes no mutation route"
+            )
     absent = PUBLIC_ROUTE_NAMES - seen
     if absent:
         raise RouteTableError(
@@ -361,9 +379,23 @@ def _validated(table: tuple[RouteSpec, ...]) -> tuple[RouteSpec, ...]:
 ROUTE_TABLE: Final[tuple[RouteSpec, ...]] = _validated(_DECLARED_ROUTES)
 
 # The demonstration denylist, derived from the table rather than restated, so the
-# middleware of task 26.6 and the table cannot disagree.
+# middleware and the table cannot disagree.
+#
+# It is derived from `mutation` rather than from the disposition, because *mutating* is
+# the property the obligation is about: a demonstration exposes no route that would
+# change stored memory (Requirement 25.12). Deriving it from the disposition instead
+# made the denylist a second, editable opinion about which routes mutate, and the two
+# had already diverged. The fourth import-time invariant keeps the two readings equal
+# — every mutating route declares blocked — so this set is also exactly the blocked
+# set, and a route can no longer slip out of it by carrying another disposition.
+#
+# The CSRF classification is a different consumer with a different question, and it
+# reads `RouteSpec.mutation` directly through `mutation_routes` and the authentication
+# middleware. Both now key on the same declaration, so widening the denylist narrowed
+# nothing: a route refused in a demonstration still requires the session's own token
+# in every other configuration.
 MUTATION_ROUTE_NAMES: Final[frozenset[str]] = frozenset(
-    spec.name for spec in ROUTE_TABLE if spec.demo is DemoDisposition.BLOCKED
+    spec.name for spec in ROUTE_TABLE if spec.mutation
 )
 
 

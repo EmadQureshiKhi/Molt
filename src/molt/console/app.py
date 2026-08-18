@@ -33,6 +33,7 @@ neither carries a message the cluster composed or a value a row holds.
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Final, cast
@@ -111,6 +112,11 @@ _UNAUTHORISED: Final[int] = 401
 _FORBIDDEN_STATUS: Final[int] = 403
 _NOT_FOUND_STATUS: Final[int] = 404
 _NOT_IMPLEMENTED_STATUS: Final[int] = 501
+
+# The package whose import attaches every view module's handlers. Resolved by name at
+# the point of use rather than imported here, because every view module imports this
+# module's request helpers and an import at this level would close that cycle.
+_VIEW_PACKAGE: Final[str] = "molt.console.routes"
 _UNAVAILABLE_STATUS: Final[int] = 503
 
 
@@ -273,7 +279,29 @@ def build_routes() -> list[BaseRoute]:
 
     The route's name is the table's name, so the middleware, the demonstration
     denylist, and the Interface_Specification all key on one identifier.
+
+    The view package is imported here, inside the call, and that placement is the whole
+    of why every page of this console once answered *not implemented*. Importing the
+    package is what attaches the handlers: each view module claims its declared routes
+    by name at import time, and the package's import list is the single place that says
+    which modules exist. Nothing imported it. Every route therefore resolved to the
+    placeholder below, in every deployment and locally alike, while eighteen written
+    handlers sat unreferenced.
+
+    It cannot be a module-level import, which is presumably how it came to be missing:
+    every view module imports the request helpers from this module, so importing the
+    package from this module's body closes a cycle and fails at start-up. Inside the
+    call there is no cycle, because this module is fully initialised before anything
+    calls it.
+
+    It is resolved by name for the reason the store resolves its driver by name: the
+    import exists for its effect rather than for anything it returns, and a bound name
+    nothing reads is a line a reader is entitled to delete. What the name is right is
+    asserted by a gate that builds the routes through this call and refuses any route
+    the placeholder would answer, so a wrong module name fails there rather than
+    silently restoring the defect.
     """
+    importlib.import_module(_VIEW_PACKAGE)
     routes: list[BaseRoute] = []
     for spec in ROUTE_TABLE:
         claimed = HANDLERS.get(spec.name)

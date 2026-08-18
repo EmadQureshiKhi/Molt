@@ -4,6 +4,12 @@
 #}
 {% extends "base.html" %}
 
+{% block standfirst %}
+  <p class="standfirst">
+    The derivation graph of the permitted Clients' Artifacts: what was produced from what. Each node opens its own subgraph, and an edge points from a parent to the child it produced.
+  </p>
+{% endblock %}
+
 {% block content %}
   <form method="get" action="/lineage">
     <p>

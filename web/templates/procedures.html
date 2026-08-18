@@ -9,6 +9,12 @@
 #}
 {% extends "base.html" %}
 
+{% block standfirst %}
+  <p class="standfirst">
+    What each Learned_Procedure has earned, and every movement that got it there. Lowest standing leads, because a procedure near the recall floor is the one worth looking at. A below-floor procedure is excluded from recall and still held in storage, where erasure reaches it.
+  </p>
+{% endblock %}
+
 {% block content %}
   <p>
     The recall floor stands at {{ "%.2f"|format(recall_floor) }}. A procedure below it

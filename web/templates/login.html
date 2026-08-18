@@ -1,9 +1,16 @@
 {#
-  The credential form: one labelled input, one submit control, no hints.
+  The credential form: one labelled input, one submit control, and one disclosure saying
+  where a reviewer is meant to get the credential from.
 
   The form posts to the same path it is served from and carries no CSRF token,
   because there is no session to protect yet and the cookie the submission issues is
   SameSite=Strict, so a cross-site submission cannot establish one.
+
+  The disclosure is a native `details` element rather than a tooltip or a scripted popover:
+  it works with no script, it is reachable and operable by keyboard because a `summary` is
+  focusable by default, and a screen reader announces its expanded state without anything
+  here declaring one. It is collapsed by default because it is an aside for a reviewer
+  arriving cold, not an instruction to an operator who already holds the credential.
 #}
 {% extends "base.html" %}
 
@@ -15,7 +22,18 @@
 
   <form method="post" action="/login" class="stack">
     <div class="field">
-      <label for="credential">Operator credential</label>
+      <label for="credential">
+        Operator credential
+        <details class="hint">
+          <summary aria-label="Where to find the operator credential">?</summary>
+          <p>
+            Reviewing this project? The credential is published in the repository's
+            <a href="https://github.com/EmadQureshiKhi/Molt#live-demo" rel="noreferrer">
+              README, under Live demo</a>. Paste it below. There is no user name, because
+            the console's principal is the credential itself.
+          </p>
+        </details>
+      </label>
       <input
         type="password"
         id="credential"

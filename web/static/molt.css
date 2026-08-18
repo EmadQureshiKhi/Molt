@@ -1,52 +1,167 @@
 /*
- * The console stylesheet. Three rules govern it and each is a requirement rather
- * than a preference.
+ * The console stylesheet.
  *
- * Contrast. Every text colour here is stated against the background it is used on
- * and clears the 4.5:1 ratio for body text: #1c1f24 on #ffffff is about 14.6:1,
- * #ffffff on #14532d is about 8.0:1, #1c1f24 on #fde68a is about 12.0:1, and the
- * link colour #124a8f on #ffffff is about 7.4:1. Colour is never the only channel:
- * links are underlined, the mode banner carries its own text, and disabled controls
- * state why they are disabled in their own accessible description.
+ * It styles semantic elements rather than class names wherever it can, so every page
+ * improves without its own template being edited and a page added later inherits the same
+ * treatment instead of arriving unstyled.
  *
- * Focus. No rule removes an outline. The focus style below strengthens the
- * platform's own rather than replacing it, so keyboard position is always visible.
+ * Five rules govern it, and each is a requirement rather than a preference.
  *
- * Native controls. Buttons, links, inputs, selects, and details are styled and
- * nothing is restyled into something it is not, so what a control looks like and
- * what assistive technology reports agree.
+ * Two colours. Ink on paper, and nothing else: there is no hue anywhere and no grey used
+ * as a surface. Depth comes from an offset shadow with no blur, emphasis from border
+ * weight, and hierarchy from type size and spacing. That is a constraint rather than a
+ * palette, and it is the reason every state in this console is named in words — a
+ * Session's standing, a run's phase, a refusal — because none of them could be signalled
+ * by colour even if someone wanted to.
+ *
+ * Contrast. Ink on paper is 19.6:1, and the one softened ink used for secondary text is
+ * 7.4:1. The requirement for body text is 4.5:1, so both clear it and both clear the 7:1
+ * enhanced threshold. No text anywhere sits on a shadow or a border.
+ *
+ * Shadows carry no information. Every one is the same offset in the same direction, so a
+ * raised element reads as raised and nothing is distinguished by how raised it is. A
+ * control that presses moves *into* its shadow, which is the whole of the interaction
+ * feedback and costs nothing to read.
+ *
+ * Focus. No rule removes an outline. The ring is drawn outside the element and is thick
+ * enough to be visible against a border of the same colour, which is what makes keyboard
+ * position legible in a monochrome interface.
+ *
+ * Motion. Every animation is an entrance or a direct response to a pointer, none loops,
+ * and all are switched off by a reduced-motion preference. Nothing moves on scroll.
  */
 
 :root {
-  --ink: #1c1f24;
-  --paper: #ffffff;
-  --rule: #6b7280;
-  --link: #124a8f;
-  --banner: #fde68a;
-  --accent: #14532d;
+  /* Two colours and the paper's own two tints. The tints are for banding a table and
+   * filling a header, never for text. */
+  --ink: #0b0b0b;
+  --ink-soft: #55555a;
+  --paper: #fbfbf7;
+  --paper-2: #f2f2ec;
+  --paper-3: #e7e7df;
+
+  /* The border and the shadow, stated once. Every raised element uses this pair, so the
+   * whole interface has one light source and one weight of line. */
+  --line: 2px;
+  --line-heavy: 3px;
+  --shadow: 4px 4px 0 0 var(--ink);
+  --shadow-lifted: 6px 6px 0 0 var(--ink);
+  --shadow-pressed: 1px 1px 0 0 var(--ink);
+
+  --radius: 10px;
+  --radius-sm: 6px;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* A geometric grotesque where the platform has one, so the chunky weights the layout
+   * leans on are actually available. Every family named is a system font: nothing is
+   * fetched, so no page waits on a stylesheet from somewhere else and no text reflows
+   * when it arrives. */
+  --ui: "Avenir Next", "Segoe UI Variable Display", "Segoe UI", Inter, system-ui,
+    -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
   margin: 0;
-  background: var(--paper);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--paper);
+  /* A faint grid, drawn rather than fetched. It gives the paper a surface for the shadows
+   * to fall on, and it is the only decoration in the whole stylesheet. */
+  background-image:
+    linear-gradient(to right, rgba(11, 11, 11, 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(11, 11, 11, 0.045) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-attachment: fixed;
   color: var(--ink);
-  font-family: system-ui, sans-serif;
-  font-size: 1rem;
-  line-height: 1.5;
+  font-family: var(--ui);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- typography */
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  line-height: 1.1;
+  text-wrap: balance;
+}
+
+h1 {
+  font-size: clamp(1.75rem, 1.3rem + 1.8vw, 2.5rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  text-transform: uppercase;
+}
+
+h2 {
+  font-size: 1.25rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+h3 {
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+p {
+  margin: 0 0 var(--space-4);
+  max-width: 74ch;
 }
 
 a {
-  color: var(--link);
+  color: var(--ink);
+  font-weight: 600;
   text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: none;
+}
+
+a:hover {
+  background: var(--ink);
+  color: var(--paper);
+  text-decoration-color: var(--paper);
 }
 
 :focus-visible {
-  outline: 3px solid var(--accent);
+  outline: var(--line-heavy) solid var(--ink);
   outline-offset: 2px;
+}
+
+code,
+kbd,
+samp {
+  font-family: var(--mono);
+  font-size: 0.875em;
 }
 
 .skip-link {
@@ -55,108 +170,974 @@ a {
 }
 
 .skip-link:focus {
-  position: static;
-  display: inline-block;
-  padding: 0.5rem;
-  background: var(--banner);
-  color: var(--ink);
+  position: fixed;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 30;
+  padding: var(--space-2) var(--space-4);
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: var(--radius-sm);
+  font-weight: 800;
+  text-decoration: none;
 }
+
+/* ------------------------------------------------------------------- banner */
 
 .banner {
-  background: var(--banner);
-  color: var(--ink);
-  padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--rule);
+  background: var(--paper-3);
+  border-bottom: var(--line) solid var(--ink);
+  padding: var(--space-3) var(--space-5);
 }
+
+.banner p {
+  margin: 0;
+  max-width: none;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+/* ----------------------------------------------------------------- masthead */
 
 .masthead {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   flex-wrap: wrap;
-  gap: 1rem;
   align-items: center;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--rule);
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  background: var(--paper);
+  border-bottom: var(--line-heavy) solid var(--ink);
 }
 
-.wordmark {
-  font-weight: 700;
+/* The mark and the word are one lockup, so they sit tight together rather than a scale step
+ * apart. The gap is smaller than anything else in this interface on purpose: the mark is
+ * trimmed to its own glyph and carries no side bearing, so a spacing step that looks correct
+ * between two blocks reads as a gap inside a logo. */
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
   margin: 0;
+  text-decoration: none;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+
+
+.brand:hover {
+  background: none;
+  color: var(--ink);
+}
+
+/* The mark is the M alone, shipped as ink on transparency, so it needs no inversion: it is
+ * already the one colour this interface draws in. It used to be inverted because the plate
+ * the deployment carried was a white mark, and inverting artwork to get the colour you want
+ * is a filter standing in for the right file.
+ *
+ * The nudge down is deliberate and small. The mark is a tall glyph whose optical centre sits
+ * above its bounding box's centre, so centring the box leaves it visually riding high against
+ * uppercase text of its own weight. Two pixels puts its crossbar on the wordmark's midline,
+ * which is where a reader expects it. It is `position: relative` rather than a margin so the
+ * row's height is unchanged and the nav beside it does not move. */
+.brand img {
+  height: 58px;
+  width: auto;
+  display: block;
+  position: relative;
+  top: 2px;
+}
+
+.brand-word {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  text-transform: uppercase;
+  /* The word sits on the same optical line as the mark: the mark's own overshoot is
+   * corrected above, and this keeps the two from drifting apart as the row wraps. */
+  line-height: 1;
+  /* Pulled in past the flex gap, which can only reach zero. The space left at zero is the
+   * wordmark's own left side bearing rather than layout: type carries that space inside the
+   * glyph box, and artwork trimmed to its ink does not, so closing the optical gap between
+   * the two means moving the text in by a little under the bearing's width. */
+  margin-left: -0.1875rem;
+}
+
+.brand-word span {
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: -0.01em;
+  color: var(--ink-soft);
+}
+
+.masthead nav {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .masthead nav ul {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: var(--space-2) var(--space-4);
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-main {
-  padding: 1rem;
-  max-width: 70rem;
+.masthead nav a {
+  display: block;
+  padding: var(--space-1) 0;
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  /* The underline is drawn as a border so it can be animated from nothing to full width
+   * without the text moving. */
+  border-bottom: var(--line-heavy) solid transparent;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease;
 }
 
-h1 {
-  font-size: 1.5rem;
+.masthead nav a:hover {
+  background: none;
+  color: var(--ink);
+  border-bottom-color: var(--paper-3);
+}
+
+/* The section being viewed. Marked in the markup with aria-current, so the visible state
+ * and the state a screen reader announces come from one attribute rather than two. */
+.masthead nav a[aria-current="page"] {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+
+.masthead form {
+  margin: 0;
+}
+
+/* --------------------------------------------------------------------- main */
+
+main {
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: 86rem;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-7);
+}
+
+main > h1 {
+  display: inline-block;
+  margin-bottom: var(--space-5);
+  padding: var(--space-2) var(--space-4);
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: var(--radius-sm);
+}
+
+main > h1 + p {
   margin-top: 0;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+/* -------------------------------------------------------------- the surfaces */
+
+/* One raised surface, shared by every panel: a table, a definition list, a summary block,
+ * a statistic. Declared once so the whole page has one light source.
+ *
+ * The hint badge is a disclosure too, and it is excluded by name. It is a control the size of
+ * a word, not a panel, and giving it a panel's border, radius and offset shadow drew a second
+ * rounded shape around the badge with its own shadow overlapping the badge's — which is
+ * exactly what it looked like. Excluding it here rather than overriding it there is what keeps
+ * the exclusion true when this list grows another property. */
+.stats li,
+table,
+dl,
+details:not(.hint),
+figure,
+form > p {
+  background: var(--paper);
+  border: var(--line) solid var(--ink);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* -------------------------------------------------------------------- stats */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--space-4);
+  list-style: none;
+  margin: 0 0 var(--space-6);
+  padding: 0;
+  max-width: none;
+}
+
+.stats li {
+  margin: 0;
+  padding: var(--space-4);
+  transition:
+    transform 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.stats li:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: var(--shadow-lifted);
+}
+
+.stat-figure {
+  display: block;
+  font-size: 2.25rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  display: block;
+  margin-top: var(--space-2);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* -------------------------------------------------------------------- forms */
+
+form {
+  margin: 0 0 var(--space-5);
+}
+
+form > p {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: none;
+  margin: 0;
+  padding: var(--space-4);
+}
+
+label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
 }
 
 .stack {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  max-width: 24rem;
+  gap: var(--space-4);
+  max-width: 28rem;
+  padding: var(--space-5);
+  background: var(--paper);
+  border: var(--line) solid var(--ink);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
 
 .field label {
-  display: block;
-  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+/* -------------------------------------------------------------- hint marker */
+
+/* A question mark that opens one sentence of help. It is a native disclosure, so it works
+ * with no script and its summary is focusable and announced without this stylesheet or the
+ * markup declaring anything about state.
+ *
+ * The marker is removed and replaced by the badge itself, which is why the summary's text is
+ * the whole control: there is no triangle beside a circle competing for the same meaning. */
+.hint {
+  display: inline-block;
+  position: relative;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+  /* Stated rather than assumed. The badge carries no surface of its own — the summary inside it
+   * is the whole visible control — and the panel it opens is positioned outside its box, so it
+   * must not clip. */
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.hint > summary {
+  display: grid;
+  place-items: center;
+  /* The badge is exactly its own size: a fixed box with no padding, so the glyph is centred by
+   * the grid rather than positioned by spacing that another rule might set. */
+  padding: 0;
+  width: 1.375rem;
+  height: 1.375rem;
+  border: var(--line) solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper);
+  box-shadow: 2px 2px 0 0 var(--ink);
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+/* Both spellings, because one is the standard and the other is what the older engine
+ * understands, and a stray triangle beside the badge would read as a second control. */
+.hint > summary::-webkit-details-marker {
+  display: none;
+}
+
+.hint > summary::marker {
+  content: "";
+}
+
+.hint > summary:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* Open is pressed: the badge moves into its own shadow, which is the same feedback every
+ * other control in this interface gives. */
+.hint[open] > summary {
+  background: var(--ink);
+  color: var(--paper);
+  box-shadow: var(--shadow-pressed);
+  transform: translate(1px, 1px);
+}
+
+/* The panel is absolutely positioned so opening it does not move the field below it. */
+.hint > p {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  width: max(18rem, 22vw);
+  max-width: 24rem;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--paper-2);
+  border: var(--line) solid var(--ink);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  font-size: 0.875rem;
+  line-height: 1.5;
 }
 
 input,
 select,
-button {
+textarea {
   font: inherit;
+  width: 100%;
   color: var(--ink);
   background: var(--paper);
-  border: 1px solid var(--rule);
-  border-radius: 0.25rem;
-  padding: 0.4rem 0.6rem;
+  border: var(--line) solid var(--ink);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  box-shadow: inset 2px 2px 0 0 rgba(11, 11, 11, 0.08);
 }
 
+form > p input,
+form > p select {
+  width: auto;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  box-shadow: var(--shadow-pressed);
+}
+
+/* A control is a slab with a shadow, and pressing it moves it into its own shadow. That
+ * movement is the whole of the feedback: nothing changes colour, so nothing depends on
+ * being able to tell two colours apart. */
 button {
-  background: var(--accent);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--paper);
-  border-color: var(--accent);
+  background: var(--ink);
+  border: var(--line) solid var(--ink);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-5);
   cursor: pointer;
+  white-space: nowrap;
+  box-shadow: var(--shadow);
+  transition:
+    transform 90ms ease,
+    box-shadow 90ms ease;
+}
+
+button:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-lifted);
+}
+
+button:active {
+  transform: translate(3px, 3px);
+  box-shadow: var(--shadow-pressed);
+}
+
+.masthead button {
+  color: var(--ink);
+  background: var(--paper);
+  padding: var(--space-2) var(--space-4);
 }
 
 button[disabled] {
-  background: var(--paper);
-  color: var(--ink);
+  color: var(--ink-soft);
+  background: var(--paper-2);
   border-style: dashed;
+  box-shadow: none;
   cursor: not-allowed;
+  transform: none;
 }
 
+button[disabled]:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------------- tables */
+
 table {
-  border-collapse: collapse;
   width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0 0 var(--space-6);
+  font-size: 0.875rem;
+  overflow: hidden;
+}
+
+caption {
+  caption-side: top;
+  text-align: left;
+  padding: 0 0 var(--space-3);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  max-width: 74ch;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 th,
 td {
-  border: 1px solid var(--rule);
-  padding: 0.4rem 0.6rem;
+  padding: var(--space-3) var(--space-4);
   text-align: left;
-  vertical-align: top;
+  vertical-align: middle;
+  /* Every cell is ruled on both axes, so a wide row is readable across and a column is
+   * readable down. The outer edges come from the table's own border. */
+  border-bottom: 1px solid rgba(11, 11, 11, 0.18);
+  border-right: 1px solid rgba(11, 11, 11, 0.12);
 }
+
+th:last-child,
+td:last-child {
+  border-right: 0;
+}
+
+tbody tr:last-child th,
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* Banded, so the eye tracks a row across a wide table without a rule under every line. */
+tbody tr:nth-child(even) {
+  background: var(--paper-2);
+}
+
+tbody tr:hover {
+  background: var(--paper-3);
+}
+
+tbody th[scope="row"] {
+  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+}
+
+/* An identifier is one long value and belongs on one line. It is given a box of its own
+ * that scrolls sideways rather than being wrapped into a stack of fragments or truncated
+ * into a tooltip: the whole value stays selectable, the link inside stays clickable, and
+ * the column keeps a predictable width.
+ *
+ * The scroll box is applied by the script, which measures first, so a value that already
+ * fits is left alone. */
+.value-scroll {
+  max-width: 22ch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  /* A hairline inset so the box reads as a box, and padding so a scrolled value does not
+   * touch the cell rule. */
+  padding: 2px 0;
+  scrollbar-width: thin;
+}
+
+.value-scroll::-webkit-scrollbar {
+  height: 6px;
+}
+
+.value-scroll::-webkit-scrollbar-track {
+  background: var(--paper-3);
+  border-radius: 3px;
+}
+
+.value-scroll::-webkit-scrollbar-thumb {
+  background: var(--ink-soft);
+  border-radius: 3px;
+}
+
+/* A table wider than the space available scrolls in its own framed box. Added by the
+ * script and only where a table actually overflows, so a table that fits keeps its own
+ * border rather than gaining a second one. */
+.table-scroll {
+  overflow-x: auto;
+  margin: 0 0 var(--space-6);
+  border: var(--line) solid var(--ink);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  background: var(--paper);
+}
+
+.table-scroll table {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.table-scroll caption {
+  padding: var(--space-4) var(--space-4) var(--space-3);
+}
+
+/* --------------------------------------------------- definition lists as data */
+
+dl {
+  display: grid;
+  grid-template-columns: minmax(11rem, max-content) 1fr;
+  gap: 0;
+  margin: 0 0 var(--space-6);
+  overflow: hidden;
+  font-size: 0.875rem;
+}
+
+dt {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid rgba(11, 11, 11, 0.18);
+  border-right: var(--line) solid var(--ink);
+  background: var(--paper-2);
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+dd {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid rgba(11, 11, 11, 0.18);
+  overflow-wrap: break-word;
+}
+
+dl > dt:nth-last-of-type(1),
+dl > dd:nth-last-of-type(1) {
+  border-bottom: 0;
+}
+
+/* ------------------------------------------------------------------ details */
+
+/* The disclosure *panel*: a block that expands to reveal a table or a list. Every rule here
+ * excludes the hint badge by name, because the badge is a disclosure of a completely different
+ * shape and none of this applies to it.
+ *
+ * The generic form of these rules is what broke the badge. `summary` carried a block padding,
+ * which a badge with a fixed width and height has no room for, so the box grew past its own
+ * dimensions and the glyph inside it shrank against the padding. `details` carried
+ * `overflow: hidden`, which would clip the panel the badge opens. Neither was overridden on the
+ * badge, because a rule that sets a property a later rule never mentions cannot be overridden by
+ * accident: it has to be excluded on purpose. */
+details:not(.hint) {
+  margin: 0 0 var(--space-5);
+  overflow: hidden;
+}
+
+details:not(.hint) > summary {
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+details:not(.hint) > summary:hover {
+  background: var(--paper-2);
+}
+
+details:not(.hint)[open] > summary {
+  border-bottom: var(--line) solid var(--ink);
+}
+
+details:not(.hint) > *:not(summary) {
+  padding: 0 var(--space-4);
+}
+
+details:not(.hint) > table,
+details:not(.hint) > dl {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  margin-bottom: 0;
+}
+
+/* --------------------------------------------------------------------- lists */
+
+main ul,
+main ol {
+  padding-left: var(--space-5);
+  max-width: 74ch;
+}
+
+main li {
+  margin-bottom: var(--space-1);
+}
+
+/* ------------------------------------------------------- the lineage diagram */
+
+figure {
+  margin: 0 0 var(--space-6);
+  padding: var(--space-5);
+  overflow-x: auto;
+}
+
+figcaption {
+  margin-bottom: var(--space-4);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  max-width: 74ch;
+}
+
+figure svg {
+  display: block;
+  /* The diagram keeps its own drawn size and the figure scrolls, rather than the diagram
+   * shrinking until its labels collide. */
+  height: auto;
+}
+
+/* The node shapes and the edges. Ink on paper like everything else, and the fill is
+ * stated rather than left to a default: an unstated fill is black, which is why the
+ * labels used to disappear into their own shapes. */
+.graph-edge {
+  stroke: var(--ink);
+  stroke-width: 2;
+  fill: none;
+  opacity: 0.55;
+}
+
+.graph-node-shape {
+  fill: var(--paper);
+  stroke: var(--ink);
+  stroke-width: 2.5;
+}
+
+/* A drawn shadow, offset the same way every raised element is, so the diagram belongs to
+ * the same interface as the panels around it. */
+.graph-node-shadow {
+  fill: var(--ink);
+  opacity: 0.9;
+}
+
+.graph-node-kind {
+  fill: var(--ink);
+  font-family: var(--ui);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.graph-node-id {
+  fill: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.graph-node {
+  cursor: pointer;
+  transition: transform 140ms ease;
+}
+
+.graph-node:hover,
+.graph-node:focus-visible {
+  /* Lifted toward its own light source, the same movement a raised panel makes. */
+  transform: translate(-2px, -2px);
+}
+
+.graph-node:focus-visible .graph-node-shape {
+  stroke-width: 4;
+}
+
+/* -------------------------------------------------------------- standfirst */
+
+/* One sentence under a page's heading saying what the page is for and, where it matters,
+ * what it deliberately does not do. It is a component rather than prose inside each page's
+ * first paragraph so that it is set apart from the content and cannot be mistaken for a
+ * finding: a reader skimming for data should be able to skip it in one glance. */
+.standfirst {
+  max-width: 62ch;
+  margin: calc(var(--space-4) * -1) 0 var(--space-6);
+  padding-left: var(--space-4);
+  border-left: var(--line-heavy) solid var(--ink);
+  color: var(--ink-soft);
+  font-size: 1.0625rem;
+  line-height: 1.55;
+  font-weight: 500;
+}
+
+/* ------------------------------------------------------------------ badges */
+
+/* A stored state as a bordered pill. Every state this console shows is a word, because a
+ * two-colour interface cannot signal one with a hue, so the badge distinguishes states by
+ * fill and weight instead: outlined is the ordinary case, and a filled badge marks the two
+ * states an operator is looking for — a Session a rule stopped, and a run that did not
+ * finish. The word is always present and is never abbreviated, so the fill adds emphasis
+ * to a label rather than carrying meaning of its own. */
+.badge {
+  display: inline-block;
+  padding: 0.15em 0.6em;
+  border: var(--line) solid var(--ink);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--ui);
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1.5;
+}
+
+.badge[data-state="halted"],
+.badge[data-state="aborted"],
+.badge[data-state="failure"],
+.badge[data-state="failed"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* A state still in progress is marked by weight rather than fill, so it reads as ongoing
+ * without competing with the two filled states for attention. */
+.badge[data-state="running"],
+.badge[data-state="pending"] {
+  border-width: var(--line-heavy);
+}
+
+/* -------------------------------------------------------------- empty state */
+
+/* What a page shows when it has nothing to show. A bare sentence in the flow reads as a
+ * page that failed to load; a drawn panel reads as an answer, which is what it is. The
+ * dashed border is the one dashed line in the interface and marks exactly this: a region
+ * that holds nothing rather than a region with a boundary. */
+.empty {
+  max-width: 62ch;
+  margin: var(--space-5) 0;
+  padding: var(--space-6) var(--space-5);
+  border: var(--line-heavy) dashed var(--ink);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  color: var(--ink);
+  font-weight: 600;
+  line-height: 1.55;
+}
+
+.empty strong {
+  display: block;
+  margin-bottom: var(--space-2);
+  font-size: 1.125rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.empty span {
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+
+/* ------------------------------------------------------------------ footer */
 
 .footer {
-  border-top: 1px solid var(--rule);
-  padding: 0.75rem 1rem;
+  border-top: var(--line-heavy) solid var(--ink);
+  padding: var(--space-5);
+  background: var(--paper-2);
+  font-size: 0.8125rem;
+  font-weight: 600;
 }
 
-.footer a {
-  margin-right: 1rem;
+.footer p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  max-width: 86rem;
+  margin: 0 auto;
+}
+
+.footer span {
+  color: var(--ink-soft);
+}
+
+/* ------------------------------------------------------------------ motion */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+main > * {
+  animation: rise 420ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+  animation-delay: var(--enter-delay, 0ms);
+}
+
+/* The diagram draws itself: each edge is dashed by its own length and the dash is walked
+ * to zero, so a line appears to be drawn from parent to child. */
+@keyframes draw {
+  from {
+    stroke-dashoffset: var(--edge-length, 240);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.graph-edge {
+  stroke-dasharray: var(--edge-length, 240);
+  animation: draw 700ms ease-out both;
+  animation-delay: 220ms;
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.graph-node {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pop 320ms cubic-bezier(0.2, 1.2, 0.3, 1) both;
+  animation-delay: var(--node-delay, 0ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .graph-edge {
+    stroke-dasharray: none;
+  }
+}
+
+/* ------------------------------------------------------------------ narrow */
+
+@media (max-width: 56rem) {
+  .masthead {
+    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+  }
+
+  .brand img {
+    height: 42px;
+  }
+
+  .brand-word {
+    font-size: 1.1875rem;
+  }
+
+  main {
+    padding: var(--space-5) var(--space-4) var(--space-6);
+  }
+
+  dl {
+    grid-template-columns: 1fr;
+  }
+
+  dt {
+    border-right: 0;
+    border-bottom: 1px solid rgba(11, 11, 11, 0.18);
+  }
+
+  .value-scroll {
+    max-width: 14ch;
+  }
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+
+  .masthead,
+  .footer,
+  form {
+    display: none;
+  }
+
+  table,
+  dl,
+  figure,
+  .stats li {
+    box-shadow: none;
+  }
 }

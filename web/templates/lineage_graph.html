@@ -2,15 +2,54 @@
   One lineage graph, rendered twice: as inline SVG and as an edge-list table.
 
   The diagram is emitted in layer order, so tab order follows derivation order. Each node
-  is a focusable group carrying a `<title>` and an accessible name stating kind, Client
-  bindings, and creation time, and each kind has both its own shape and its own text
-  label so colour carries nothing on its own. The connecting lines are hidden from
-  assistive technology because the edge-list table below is their equivalent, and it is
-  the representation that works without vision.
+  is a focusable group carrying a `<title>` and an accessible name stating kind and Client
+  bindings, and each kind has both its own shape and its own text label so colour carries
+  nothing on its own. The connecting lines are hidden from assistive technology because
+  the edge-list table below is their equivalent, and it is the representation that works
+  without vision.
+
+  Three things about the geometry are deliberate, and each corrects a way the diagram was
+  unreadable.
+
+  Every label is styled by the stylesheet rather than left to a default. An SVG `text`
+  element with no fill is painted black, so on any surface that is not white the labels
+  were invisible — present in the markup, selectable, and impossible to see.
+
+  A node is as wide as its longest label rather than a fixed width. Kinds are words like
+  `derived_artifact`, which at a readable size is far wider than the box that used to hold
+  it, so the text ran out through both sides of its own shape. The width is computed below
+  from the label length, and the layer pitch is derived from the widest node in the graph,
+  so nothing overlaps whatever the data holds.
+
+  The shadow under each node is drawn as a second shape rather than as a filter. A filter
+  would blur, and every other raised thing in this interface casts the same hard offset
+  shadow; drawing it keeps the diagram in the same visual language as the panels around it
+  and costs one more element per node.
 #}
+
+{#
+  Geometry. The label width is estimated from the character count at the label's own size,
+  which is exact enough for a monospace identifier and close enough for an upper-case kind,
+  and it is clamped so a short label still gets a box worth looking at.
+#}
+{% set node_h = 64 %}
+{% set row_pitch = 104 %}
+{% set widths = {} %}
+{% for node in graph.nodes %}
+  {% set label_chars = [node.kind | length, node.short_id | length] | max %}
+  {% set _ = widths.update({node.id | string: [128, 26 + label_chars * 9] | max}) %}
+{% endfor %}
+{% set widest = (widths.values() | list | max) if widths else 128 %}
+{% set col_pitch = widest + 92 %}
+
 {% set positions = {} %}
 {% for node in graph.nodes %}
-  {% set _ = positions.update({node.id | string: [60 + node.layer * 190, 50 + node.order * 80]}) %}
+  {% set _ = positions.update({
+    node.id | string: [
+      70 + (widest / 2) | round(0, 'floor') | int + node.layer * col_pitch,
+      58 + node.order * row_pitch,
+    ]
+  }) %}
 {% endfor %}
 
 {% if not graph.nodes %}
@@ -20,44 +59,92 @@
     <figcaption id="graph-caption">
       Derivation graph: {{ graph.nodes | length }} node(s) in {{ graph.depth }} layer(s)
       and {{ graph.edges | length }} edge(s). Parents sit to the left of the Artifacts
-      derived from them. Each node is focusable in layer order.
+      derived from them. Each node is focusable in layer order, and each links to its own
+      subgraph.
     </figcaption>
     <svg
       role="group"
       aria-labelledby="graph-caption"
-      width="{{ graph.depth * 190 + 160 }}"
-      height="{{ graph.width * 80 + 100 }}"
-      viewBox="0 0 {{ graph.depth * 190 + 160 }} {{ graph.width * 80 + 100 }}"
+      width="{{ graph.depth * col_pitch + widest + 140 }}"
+      height="{{ graph.width * row_pitch + 116 }}"
+      viewBox="0 0 {{ graph.depth * col_pitch + widest + 140 }} {{ graph.width * row_pitch + 116 }}"
     >
-      <g aria-hidden="true" stroke="currentColor" stroke-width="1">
+      <g aria-hidden="true">
         {% for edge in graph.edges %}
           {% set parent = positions.get(edge.parent_id | string) %}
           {% set child = positions.get(edge.child_id | string) %}
           {% if parent and child %}
-            <line x1="{{ parent[0] + 50 }}" y1="{{ parent[1] }}" x2="{{ child[0] - 50 }}" y2="{{ child[1] }}" />
+            {% set half_parent = (widths.get(edge.parent_id | string, widest) / 2) | round(0, 'floor') | int %}
+            {% set half_child = (widths.get(edge.child_id | string, widest) / 2) | round(0, 'floor') | int %}
+            {% set x1 = parent[0] + half_parent %}
+            {% set x2 = child[0] - half_child %}
+            {#
+              The dash length each edge animates from is its own length, so a long edge and
+              a short one are drawn at the same speed rather than the same duration.
+            #}
+            {% set span = ((x2 - x1) | abs) + ((child[1] - parent[1]) | abs) + 20 %}
+            <line
+              class="graph-edge"
+              style="--edge-length: {{ span }}"
+              x1="{{ x1 }}" y1="{{ parent[1] }}"
+              x2="{{ x2 }}" y2="{{ child[1] }}"
+            />
           {% endif %}
         {% endfor %}
       </g>
+
       {% for node in graph.nodes %}
         {% set point = positions.get(node.id | string) %}
-        <g tabindex="0" role="img" aria-label="{{ node.accessible_name }}">
-          <title>{{ node.accessible_name }}</title>
-          {% if node.shape == "ellipse" %}
-            <ellipse cx="{{ point[0] }}" cy="{{ point[1] }}" rx="48" ry="24"
-                     fill="none" stroke="currentColor" stroke-width="2" />
-          {% elif node.shape == "circle" %}
-            <circle cx="{{ point[0] }}" cy="{{ point[1] }}" r="26"
-                    fill="none" stroke="currentColor" stroke-width="2" />
-          {% elif node.shape == "diamond" %}
-            <polygon points="{{ point[0] }},{{ point[1] - 26 }} {{ point[0] + 50 }},{{ point[1] }} {{ point[0] }},{{ point[1] + 26 }} {{ point[0] - 50 }},{{ point[1] }}"
-                     fill="none" stroke="currentColor" stroke-width="2" />
-          {% else %}
-            <rect x="{{ point[0] - 50 }}" y="{{ point[1] - 24 }}" width="100" height="48"
-                  fill="none" stroke="currentColor" stroke-width="2" />
-          {% endif %}
-          <text x="{{ point[0] }}" y="{{ point[1] - 4 }}" text-anchor="middle">{{ node.kind }}</text>
-          <text x="{{ point[0] }}" y="{{ point[1] + 12 }}" text-anchor="middle">{{ node.short_id }}</text>
-        </g>
+        {% set w = widths.get(node.id | string, widest) %}
+        {% set half = (w / 2) | round(0, 'floor') | int %}
+        {% set half_h = (node_h / 2) | round(0, 'floor') | int %}
+        {#
+          Only an Artifact opens a page of its own, so only an Artifact is drawn as a link.
+          A closure reaches the Event that produced one and the Session it happened in, and
+          those are nodes to read rather than nodes to open: linking them offered a reader a
+          page answering that no such Artifact exists. A node that is not a link is still
+          focusable and still carries its accessible name, so nothing is lost to a keyboard
+          or to a screen reader.
+        #}
+        {% if node.has_subgraph %}<a href="/lineage/{{ node.id }}" aria-label="{{ node.accessible_name }}">{% endif %}
+          <g
+            class="graph-node"
+            style="--node-delay: {{ 60 + loop.index0 * 45 }}ms"
+            tabindex="0"
+            role="img"
+            aria-label="{{ node.accessible_name }}"
+          >
+            <title>{{ node.accessible_name }}</title>
+
+            {# The drawn shadow, one offset behind the shape it belongs to. #}
+            {% if node.shape == "ellipse" %}
+              <ellipse class="graph-node-shadow" cx="{{ point[0] + 4 }}" cy="{{ point[1] + 4 }}"
+                       rx="{{ half }}" ry="{{ half_h }}" />
+              <ellipse class="graph-node-shape" cx="{{ point[0] }}" cy="{{ point[1] }}"
+                       rx="{{ half }}" ry="{{ half_h }}" />
+            {% elif node.shape == "circle" %}
+              <circle class="graph-node-shadow" cx="{{ point[0] + 4 }}" cy="{{ point[1] + 4 }}"
+                      r="{{ half_h }}" />
+              <circle class="graph-node-shape" cx="{{ point[0] }}" cy="{{ point[1] }}"
+                      r="{{ half_h }}" />
+            {% elif node.shape == "diamond" %}
+              <polygon class="graph-node-shadow"
+                       points="{{ point[0] + 4 }},{{ point[1] - half_h + 4 }} {{ point[0] + half + 4 }},{{ point[1] + 4 }} {{ point[0] + 4 }},{{ point[1] + half_h + 4 }} {{ point[0] - half + 4 }},{{ point[1] + 4 }}" />
+              <polygon class="graph-node-shape"
+                       points="{{ point[0] }},{{ point[1] - half_h }} {{ point[0] + half }},{{ point[1] }} {{ point[0] }},{{ point[1] + half_h }} {{ point[0] - half }},{{ point[1] }}" />
+            {% else %}
+              <rect class="graph-node-shadow" x="{{ point[0] - half + 4 }}" y="{{ point[1] - half_h + 4 }}"
+                    width="{{ w }}" height="{{ node_h }}" rx="8" />
+              <rect class="graph-node-shape" x="{{ point[0] - half }}" y="{{ point[1] - half_h }}"
+                    width="{{ w }}" height="{{ node_h }}" rx="8" />
+            {% endif %}
+
+            <text class="graph-node-kind" x="{{ point[0] }}" y="{{ point[1] - 4 }}"
+                  text-anchor="middle">{{ node.kind }}</text>
+            <text class="graph-node-id" x="{{ point[0] }}" y="{{ point[1] + 15 }}"
+                  text-anchor="middle">{{ node.short_id }}</text>
+          </g>
+        {% if node.has_subgraph %}</a>{% endif %}
       {% endfor %}
     </svg>
   </figure>
@@ -91,7 +178,7 @@
   </table>
 
   <table>
-    <caption>Node list: kind, shape, Client bindings, and creation time per node.</caption>
+    <caption>Node list: kind, shape, layer, and Client bindings per node.</caption>
     <thead>
       <tr>
         <th scope="col">Artifact</th>
@@ -99,18 +186,23 @@
         <th scope="col">Shape</th>
         <th scope="col">Layer</th>
         <th scope="col">Client bindings</th>
-        <th scope="col">Created</th>
       </tr>
     </thead>
     <tbody>
       {% for node in graph.nodes %}
         <tr>
-          <th scope="row"><a href="/lineage/{{ node.id }}">{{ node.id }}</a></th>
+          {# Linked only where there is a page to open, for the reason the diagram states. #}
+          <th scope="row">
+            {% if node.has_subgraph %}
+              <a href="/lineage/{{ node.id }}">{{ node.id }}</a>
+            {% else %}
+              {{ node.id }}
+            {% endif %}
+          </th>
           <td>{{ node.kind }}{% if node.detail %} ({{ node.detail }}){% endif %}</td>
           <td>{{ node.shape }}</td>
           <td>{{ node.layer }}</td>
           <td>{{ node.client_label if node.client_label else "none recorded" }}</td>
-          <td>{{ node.created_at.isoformat() if node.created_at else "not recorded for this kind" }}</td>
         </tr>
       {% endfor %}
     </tbody>

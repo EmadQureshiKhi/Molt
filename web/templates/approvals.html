@@ -1,0 +1,127 @@
+{#
+  The Approval_Queue view.
+
+  One table row per queue entry, pending entries first. Each pending row carries its own
+  form with two native submit buttons, one per decision the schema admits, and each
+  button carries an accessible name naming both the decision and the entry it applies
+  to, so two rows are never distinguished by position alone. No control is a container
+  with a handler and no decision is encoded by colour: the standing, the decision, and
+  the resolving principal are all text in their own labelled cells.
+
+  In read-only demonstration mode the buttons render disabled with a stated explanation
+  rather than hidden, so the queue shows what it would do without doing it.
+#}
+{% extends "base.html" %}
+
+{% block standfirst %}
+  <p class="standfirst">
+    Every entry a require-approval rule has queued, pending first. Resolving an entry records who decided and what they decided; an entry already resolved keeps the first decision, so the record always names one accountable principal.
+  </p>
+{% endblock %}
+
+{% block content %}
+  <p>
+    An entry is raised by the policy watcher when a rule asks for approval, and it blocks
+    the actions that rule matches for its Session until it is answered. Resolving one
+    records the decision, the operator that made it, and the instant together; a first
+    decision stands, so an entry answered twice keeps the first.
+  </p>
+
+  {% if controls_disabled %}
+    <p role="status" id="approvals-blocked">{{ blocked_explanation }}</p>
+  {% endif %}
+
+  {% if notice %}
+    <p role="status">{{ notice }}</p>
+  {% endif %}
+
+  <p>
+    {{ pending_count }} entry or entries await an operator, of {{ rows|length }} shown.
+    At most {{ page_limit }} entries are listed.
+  </p>
+
+  {% if rows %}
+    <table>
+      <caption>
+        Queued approvals for every Client this console may see, pending entries first and
+        oldest first within each standing.
+      </caption>
+      <thead>
+        <tr>
+          <th scope="col">Entry</th>
+          <th scope="col">Client</th>
+          <th scope="col">Rule</th>
+          <th scope="col">Action the rule asks for</th>
+          <th scope="col">Session</th>
+          <th scope="col">Triggering event</th>
+          <th scope="col">Standing</th>
+          <th scope="col">Decision</th>
+          <th scope="col">Resolved by</th>
+          <th scope="col">Resolution</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <th scope="row">{{ row.entry.id }}</th>
+            <td>{{ row.client_label }}</td>
+            <td>{{ row.entry.rule_name }}</td>
+            <td>{{ row.entry.action }}</td>
+            <td>{{ row.entry.session_id }}</td>
+            <td>
+              {% if row.entry.event_id %}
+                {{ row.entry.event_id }}
+              {% else %}
+                Not applicable: this entry was raised by no single Event
+              {% endif %}
+            </td>
+            <td>{{ row.entry.status }}</td>
+            <td>
+              {% if row.entry.decision %}
+                {{ row.entry.decision }}
+              {% else %}
+                Not decided
+              {% endif %}
+            </td>
+            <td>
+              {% if row.entry.resolved_by %}
+                {{ row.entry.resolved_by }}
+              {% else %}
+                Nobody yet
+              {% endif %}
+            </td>
+            <td>
+              {% if row.pending %}
+                <form method="post" action="/approvals/{{ row.entry.id }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <button
+                    type="submit"
+                    name="{{ decision_field }}"
+                    value="{{ approved_value }}"
+                    aria-label="Approve entry {{ row.entry.id }}"
+                    {% if controls_disabled %}
+                      disabled aria-describedby="approvals-blocked"
+                    {% endif %}
+                  >Approve</button>
+                  <button
+                    type="submit"
+                    name="{{ decision_field }}"
+                    value="{{ denied_value }}"
+                    aria-label="Deny entry {{ row.entry.id }}"
+                    {% if controls_disabled %}
+                      disabled aria-describedby="approvals-blocked"
+                    {% endif %}
+                  >Deny</button>
+                </form>
+              {% else %}
+                Already resolved, and the first decision stands
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>No approval is queued for any Client this console may see.</p>
+  {% endif %}
+{% endblock %}

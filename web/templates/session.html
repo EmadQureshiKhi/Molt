@@ -18,15 +18,8 @@
       <dt>Machine</dt><dd>{{ detail.session.machine_id }}</dd>
       <dt>Nesting depth</dt><dd>{{ detail.session.depth }}</dd>
       <dt>Outcome</dt><dd>{{ detail.session.outcome }}</dd>
-      <dt>Started</dt><dd>{{ detail.session.started_at.isoformat() }}</dd>
-      <dt>Ended</dt>
-      <dd>
-        {% if detail.session.ended_at %}
-          {{ detail.session.ended_at.isoformat() }}
-        {% else %}
-          still running
-        {% endif %}
-      </dd>
+      <dt>Standing</dt>
+      <dd>{% if detail.session.ended_at %}closed{% else %}still running{% endif %}</dd>
       <dt>Accrued cost (USD)</dt><dd>{{ detail.session.cost_usd }}</dd>
     </dl>
   </section>
@@ -73,8 +66,6 @@
           <tr>
             <th scope="col">Sequence</th>
             <th scope="col">Category</th>
-            <th scope="col">Occurred</th>
-            <th scope="col">Recorded</th>
             <th scope="col">Redacted</th>
             <th scope="col">Content digest</th>
             <th scope="col">Chain digest</th>
@@ -85,8 +76,6 @@
             <tr>
               <th scope="row">{{ event.seq }}</th>
               <td>{{ event.category }}</td>
-              <td>{{ event.occurred_at.isoformat() }}</td>
-              <td>{{ event.recorded_at.isoformat() }}</td>
               <td>{{ "redacted" if event.redacted else "not redacted" }}</td>
               <td>{{ event.content_digest }}</td>
               <td>{{ event.chain_digest }}</td>
@@ -110,7 +99,6 @@
             <th scope="col">Agent CLI</th>
             <th scope="col">Nesting depth</th>
             <th scope="col">Outcome</th>
-            <th scope="col">Started</th>
           </tr>
         </thead>
         <tbody>
@@ -120,7 +108,6 @@
               <td>{{ child.agent_cli }}</td>
               <td>{{ child.depth }}</td>
               <td>{{ child.outcome }}</td>
-              <td>{{ child.started_at.isoformat() }}</td>
             </tr>
           {% endfor %}
         </tbody>

@@ -278,7 +278,7 @@ async def erase_detail(request: Request) -> Response:
             return (None, ())
         return (header, read_dispositions(cursor, identifier))
 
-    header, dispositions = console.store.read(body)
+    header, dispositions = console.read_only_store().read(body)
     if header is None:
         log(Severity.INFO, COMPONENT, "the run detail view was asked for an absent run")
         return JSONResponse(dict(_NOT_FOUND), status_code=_NOT_FOUND_STATUS)
@@ -311,7 +311,7 @@ async def erase_redaction(request: Request) -> Response:
     if templates is None:
         return JSONResponse({"error": "unavailable"}, status_code=_UNAVAILABLE_STATUS)
 
-    evidence = console.store.read(
+    evidence = console.read_only_store().read(
         lambda cursor: read_redaction(cursor, run_identifier, artifact_identifier)
     )
     if evidence is None:

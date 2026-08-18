@@ -8,6 +8,12 @@
 #}
 {% extends "base.html" %}
 
+{% block standfirst %}
+  <p class="standfirst">
+    The four memory tiers, each with a live row count and the rules that govern it. The working tier is the one tier whose rows are freely overwritten, and it is excluded from every piece of erasure evidence, which its row states plainly.
+  </p>
+{% endblock %}
+
 {% block content %}
   <p>
     Every count is read from the cluster inside one read-only transaction at the moment

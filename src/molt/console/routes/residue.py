@@ -223,7 +223,7 @@ async def residue(request: Request) -> Response:
             "the console templates are not available", status_code=UNAVAILABLE_STATUS
         )
     policy = ResiduePolicy.from_configuration(configuration_of(request))
-    view = residue_view(console.store, policy, dict(request.query_params))
+    view = residue_view(console.read_only_store(), policy, dict(request.query_params))
     session = session_of(request)
     return templates.TemplateResponse(
         request,

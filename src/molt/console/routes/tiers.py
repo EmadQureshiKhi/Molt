@@ -57,6 +57,7 @@ __all__ = [
     "CLUSTER_NOW_QUERY",
     "COMMIT_STATEMENT",
     "COMPONENT",
+    "COUNTS_UNAVAILABLE_NOTICE",
     "TEMPLATE",
     "TIER_COUNT_QUERIES",
     "UNREADABLE_CRON",
@@ -80,6 +81,15 @@ TEMPLATE: Final[str] = "tiers.html"
 # interpret. Naming the situation is the honest answer: an interval guessed from an
 # expression nobody read is worse than no interval at all.
 UNREADABLE_CRON: Final[str] = "not derivable from the reported expression"
+
+# What the page says when the counts could not be taken at all. Counting every tier is the
+# widest read this console performs, so it is the read a statement timeout reaches first
+# while an authorised erasure sweeps the same tables. Saying so is the answer; a page that
+# fails outright would report a defect where there is contention.
+COUNTS_UNAVAILABLE_NOTICE: Final[str] = (
+    "the tier counts could not be taken from the cluster, which is what a read of every "
+    "tier answers with while an erasure is sweeping the same tables"
+)
 
 # The transaction the counts are taken in. Read-only is declared to the cluster, so a
 # statement that wrote would be refused by the cluster rather than merely absent from
@@ -326,7 +336,7 @@ async def tiers_view(request: Request) -> Response:
         "notice": None,
     }
     try:
-        context["view"] = read_tiers(console_of(request).store)
+        context["view"] = read_tiers(console_of(request).read_only_store())
     except MoltError as error:
         log(
             Severity.INFO,
@@ -335,6 +345,22 @@ async def tiers_view(request: Request) -> Response:
             error_type=type(error).__name__,
         )
         context["notice"] = str(error)
+    # A read that does not complete is the other way this page fails to have counts, and
+    # it is not a shape this module raised. Counting every tier is the widest read the
+    # console performs, so it is the first read to be cancelled by the statement timeout
+    # when an authorised erasure is sweeping the same tables — which is a moment a reviewer
+    # is especially likely to be looking at this page. A page reporting that the counts
+    # could not be taken is the honest answer and the answer every other read-only view
+    # here already gives; a page that fails outright reports a defect where there is
+    # contention.
+    except Exception as error:
+        log(
+            Severity.WARNING,
+            COMPONENT,
+            "the tier counts could not be read, so no count is rendered",
+            error_type=type(error).__name__,
+        )
+        context["notice"] = COUNTS_UNAVAILABLE_NOTICE
     return _page(request, context)
 
 

@@ -11,6 +11,12 @@
 #}
 {% extends "base.html" %}
 
+{% block standfirst %}
+  <p class="standfirst">
+    A semantic search for memory that survives an explicit erasure by paraphrase rather than by identifier. This page reads a recorded run's candidate set and writes nothing.
+  </p>
+{% endblock %}
+
 {% block content %}
   <p>
     This search runs the Residue_Detector's own walk with recording suppressed. It

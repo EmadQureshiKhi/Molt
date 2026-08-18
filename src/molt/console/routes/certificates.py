@@ -17,12 +17,22 @@ performs the same checks the `attest verify` verb performs. Nothing here re-impl
 a check and nothing here writes.
 
 **An absent key service is an operational failure, never a verification outcome.**
-The verifier needs the public half of the signing key through a `PublicKeySource`, and
-this build carries no client for the key service. Reporting that as *failed* would
-libel a valid certificate, so the page reports the missing component with its own
-status and states plainly that no verification was attempted. The distinction is the
-same one the `attest verify` verb draws between an operational failure and a
-verification whose answer was negative.
+The verifier needs the public half of the signing key through a `PublicKeySource`,
+resolved here through `molt.attest.keys.public_key_source` against the console's own
+configuration surface: the saved public half where one is provisioned, and the key
+service otherwise. A surface naming no signing key at all resolves nothing, and
+reporting that as *failed* would libel a valid certificate — so the page reports the
+missing component with its own status and states plainly that no verification was
+attempted. The distinction is the same one the `attest verify` verb draws between an
+operational failure and a verification whose answer was negative.
+
+**The verification reads through the console's read-only handle.** The verifier refuses
+a connection whose configured role is not the read-only one, so that its no-mutation
+claim rests on a privilege rather than on care. The console function holds the eraser
+role, because the erasure console runs erasures from it, and a verification offered
+that handle would be declined before reading anything — reported, correctly but
+uselessly, as unattempted in every deployment. So both routes here read through
+`Console.read_only_store()`.
 """
 
 from __future__ import annotations
@@ -194,8 +204,12 @@ async def certificate_verify(request: Request) -> Response:
     """Verify the stored certificate live and display the outcome (Requirement 25.7).
 
     The route mutates nothing: it is classified as a mutation only because it is a
-    form submission carrying a CSRF token, and the verifier itself refuses any
-    connection that is not the read-only role.
+    form submission carrying a CSRF token, which is why demonstration mode permits it
+    while blocking the two routes that do write. The verifier itself refuses any
+    connection that is not the read-only role, so this page is served through the
+    console's read-only handle rather than the eraser handle the function holds — on
+    the eraser handle the verifier would refuse, and the page would report the
+    verification as unattempted in every deployment.
     """
     return await _render(request, verification=None)
 
@@ -219,7 +233,7 @@ async def _render(
     if templates is None:
         return JSONResponse({"error": "unavailable"}, status_code=_UNAVAILABLE_STATUS)
 
-    row = console.store.read(lambda cursor: read_certificate(cursor, identifier))
+    row = console.read_only_store().read(lambda cursor: read_certificate(cursor, identifier))
     if row is None:
         log(Severity.INFO, COMPONENT, "a certificate was requested for a run holding none")
         return JSONResponse(dict(_NOT_FOUND), status_code=_NOT_FOUND_STATUS)
@@ -264,7 +278,7 @@ def _verified_block(console: Console, row: CertificateRow, request: Request) -> 
         return _unattempted_block(error.component)
     try:
         report = verify_certificate(
-            envelope_of(row), store=console.store, keys=keys, now=console.now()
+            envelope_of(row), store=console.read_only_store(), keys=keys, now=console.now()
         )
     except VerificationFailedError as error:
         log(

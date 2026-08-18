@@ -18,6 +18,12 @@
 #}
 {% extends "base.html" %}
 
+{% block standfirst %}
+  <p class="standfirst">
+    Start a governed erasure and watch it progress. A dry run adjudicates and disposes of nothing; a live run deletes, records evidence for every decision, and ends in a signed certificate.
+  </p>
+{% endblock %}
+
 {% block content %}
   <p>
     Starting a run records the attempt and returns its identifier immediately. The run

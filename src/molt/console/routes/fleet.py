@@ -80,7 +80,7 @@ def fleet_rows(
     ordered across Clients afterwards so the overview reads as one fleet rather than as
     a sequence of per-tenant blocks.
     """
-    store = console_of(request).store
+    store = console_of(request).read_only_store()
     covered = (chosen,) if chosen is not None else roster
     rows: list[FleetRow] = []
     for choice in covered:

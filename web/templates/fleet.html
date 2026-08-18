@@ -7,7 +7,45 @@
 #}
 {% extends "base.html" %}
 
+{% block standfirst %}
+  <p class="standfirst">
+    Every Session recorded for the Clients this console is permitted to read, newest first.
+    A Session is one agent run: what it did is counted here, and what it produced is
+    reachable from its own page. Nothing on this page can change stored memory.
+  </p>
+{% endblock %}
+
 {% block content %}
+  {% if rows %}
+    {#
+      Four totals over the rows already read, summed in the template rather than by a
+      second query: the rows are in hand, and a count read separately could disagree
+      with the table beneath it. Each figure carries its own value as an attribute so
+      the script can animate up to it; the value is already the text, so a reader
+      without the script sees the same number.
+    #}
+    {% set running = rows | selectattr('running') | list | length %}
+    {% set halted = rows | selectattr('session.halted') | list | length %}
+    <ul class="stats" aria-label="Totals across the Sessions shown">
+      <li>
+        <span class="stat-figure" data-count="{{ rows | length }}">{{ rows | length }}</span>
+        <span class="stat-label">Sessions</span>
+      </li>
+      <li>
+        <span class="stat-figure" data-count="{{ roster | length }}">{{ roster | length }}</span>
+        <span class="stat-label">Clients</span>
+      </li>
+      <li>
+        <span class="stat-figure" data-count="{{ running }}">{{ running }}</span>
+        <span class="stat-label">Still running</span>
+      </li>
+      <li>
+        <span class="stat-figure" data-count="{{ halted }}">{{ halted }}</span>
+        <span class="stat-label">Halted by policy</span>
+      </li>
+    </ul>
+  {% endif %}
+
   <form method="get" action="/">
     <p>
       <label for="client-filter">Client</label>
@@ -23,12 +61,34 @@
     </p>
   </form>
 
+  {#
+    Three different reasons a page shows no row, kept as three answers rather than one.
+    Which one it is tells an operator whether to widen the filter, correct it, or conclude
+    that nothing has been captured yet.
+  #}
   {% if not roster %}
-    <p>No Client is readable in this console's permitted set, so no Session is shown.</p>
+    <p class="empty">
+      <strong>No readable Client</strong>
+      <span>
+        This console's permitted set names no Client, so there is no Session it may show.
+      </span>
+    </p>
   {% elif not filter_recognised %}
-    <p>That Client filter names no Client in this console's permitted set, so no Session is shown.</p>
+    <p class="empty">
+      <strong>That filter names no permitted Client</strong>
+      <span>
+        The Client asked for is outside this console's permitted set. Choose one from the
+        list above, or clear the filter to see every permitted Client at once.
+      </span>
+    </p>
   {% elif not rows %}
-    <p>No Session has been recorded for the permitted Clients shown above.</p>
+    <p class="empty">
+      <strong>No Session captured yet</strong>
+      <span>
+        The Clients above are readable and hold no Session. A Session appears here as soon
+        as a capture adapter reports one.
+      </span>
+    </p>
   {% else %}
     <table>
       <caption>
@@ -48,7 +108,6 @@
           <th scope="col">Events accounted</th>
           <th scope="col">Errors</th>
           <th scope="col">Accrued cost (USD)</th>
-          <th scope="col">Started</th>
         </tr>
       </thead>
       <tbody>
@@ -61,13 +120,12 @@
             <td>{{ row.session.agent_cli }}</td>
             <td>{{ row.session.machine_id }}</td>
             <td>{{ row.session.depth }}</td>
-            <td>{{ row.standing }}</td>
+            <td><span class="badge" data-state="{{ row.standing }}">{{ row.standing }}</span></td>
             <td>{{ row.session.tool_call_count }}</td>
             <td>{{ row.session.model_request_count }}</td>
             <td>{{ row.activity }}</td>
             <td>{{ row.session.error_count }}</td>
             <td>{{ row.cost }}</td>
-            <td>{{ row.session.started_at.isoformat() }}</td>
           </tr>
         {% endfor %}
       </tbody>

@@ -160,14 +160,36 @@ class GraphNode:
         return str(self.id).split("-")[0]
 
     @property
+    def has_subgraph(self) -> bool:
+        """Whether this node has a page of its own to open.
+
+        Only a Derived_Artifact does. The subgraph route walks the derivation graph from
+        an Artifact, and a closure reaches nodes that are not Artifacts at all — the Event
+        that produced one, the Session it happened in — because omitting them would draw an
+        edge to nothing. Those are nodes to read, not nodes to open.
+
+        Stated here rather than in the template because the graph renders each node in
+        three places, and a link condition written three times is a link condition that
+        comes to disagree with itself. Every node was linked, so two thirds of the diagram
+        offered a reader a page that answers *no such Artifact*.
+        """
+        return self.kind == _DERIVED_KIND
+
+    @property
     def accessible_name(self) -> str:
-        """Kind, Client bindings, and creation time, as one sentence."""
-        created = "creation time not recorded for this kind"
-        if self.created_at is not None:
-            created = f"created {self.created_at.isoformat()}"
+        """Kind and Client bindings, as one sentence.
+
+        The creation instant used to close this sentence and no longer does. It was the
+        machine rendering the cluster returns — a full date, a time to the microsecond,
+        and an offset — and read aloud by a screen reader it was a long string of digits
+        in front of the two facts a reader of a lineage node actually needs, which are
+        what the node is and whose it is. The graph's own shape carries the ordering the
+        instant was standing in for: an edge points from a parent to the child it
+        produced, and the layers are computed from those edges.
+        """
         bindings = self.client_label or "no permitted Client binding recorded"
         named = self.kind if not self.detail else f"{self.kind} of kind {self.detail}"
-        return f"{named} {self.short_id}, bound to {bindings}, {created}"
+        return f"{named} {self.short_id}, bound to {bindings}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,7 +281,7 @@ def _permitted_artifact(
         row = opened.fetchone()
         return None if row is None else _artifact_row_of(row)
 
-    return console.store.read(body)
+    return console.read_only_store().read(body)
 
 
 def _permitted_nodes(
@@ -275,7 +297,7 @@ def _permitted_nodes(
         opened.execute(SELECT_PERMITTED_NODES_STATEMENT, (seeds, scope, scope))
         return tuple(_artifact_row_of(row) for row in opened.fetchall())
 
-    return console.store.read(body)
+    return console.read_only_store().read(body)
 
 
 def _closure(
@@ -294,7 +316,7 @@ def _closure(
             for row in opened.fetchall()
         )
 
-    return console.store.read(body)
+    return console.read_only_store().read(body)
 
 
 def _permitted_edges(console: Console, identifiers: Sequence[UUID]) -> tuple[GraphEdge, ...]:
@@ -307,7 +329,7 @@ def _permitted_edges(console: Console, identifiers: Sequence[UUID]) -> tuple[Gra
         opened.execute(SELECT_PERMITTED_EDGES_STATEMENT, (nodes, nodes))
         return tuple(_edge_of(row) for row in opened.fetchall())
 
-    return console.store.read(body)
+    return console.read_only_store().read(body)
 
 
 def _edge_of(row: Sequence[object]) -> GraphEdge:
@@ -419,7 +441,9 @@ async def lineage(request: Request) -> Response:
         for choice in covered:
             seeds.extend(
                 summary.id
-                for summary in artifacts_of_client(console.store, choice.id, limit=SEEDS_PER_CLIENT)
+                for summary in artifacts_of_client(
+                    console.read_only_store(), choice.id, limit=SEEDS_PER_CLIENT
+                )
             )
     reached = _closure(console, SELECT_PERMITTED_ANCESTORS_STATEMENT, seeds, scope)
     described = _permitted_nodes(console, seeds + [identifier for identifier, _ in reached], scope)

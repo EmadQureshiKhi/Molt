@@ -398,14 +398,32 @@ def test_the_artifact_subgraph_answers_an_unpermitted_artifact_as_absent() -> No
     assert not [statement for statement in sent if "descendants AS (" in statement]
 
 
-def test_the_artifact_subgraph_names_kind_bindings_and_creation_time() -> None:
+def test_the_artifact_subgraph_names_its_kind_and_bindings_and_no_instant() -> None:
+    """The subgraph identifies each node and its tenancy, and shows no raw instant.
+
+    The absence is asserted rather than left to inspection. This case previously required
+    the creation instant to appear, and the console showed instants as the machine form
+    the cluster returns — a full date, time, microseconds, and offset — in eleven places
+    across six pages. They were the widest column on several tables while telling a
+    reviewer nothing they came to learn, and on a seeded corpus the dates say only when
+    the seed was run.
+
+    What the pages carry instead is the ordering, which is what the instant was standing
+    in for: every table states its order in its own caption, a Session's events are
+    numbered in sequence beside their chain digests, and a Session says whether it is
+    still running rather than when it stopped. So no temporal evidence was removed — the
+    machine rendering of it was.
+    """
     store = FakeStore()
     answer = _serve(f"/lineage/{PERMITTED_ARTIFACT}", store=store)
     assert answer["statusCode"] == 200
     rendered = _body(answer)
     assert "aria-label=" in rendered
     assert "bound to Permitted Tenant" in rendered
-    assert NOW.isoformat() in rendered
+    assert NOW.isoformat() not in rendered, (
+        "the subgraph renders a raw instant, which is the machine form of a value no "
+        "reader of this page asked for"
+    )
 
 
 def test_the_graph_layers_a_child_below_its_parent() -> None:

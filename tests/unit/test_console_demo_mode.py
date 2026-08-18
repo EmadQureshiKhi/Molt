@@ -12,10 +12,15 @@ blocked stays reachable.
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
+from uuid import UUID
+
+import pytest
 
 from molt.config.secrets import Credential, CredentialSource
 from molt.console import auth
@@ -23,22 +28,30 @@ from molt.console.app import build_app
 from molt.console.demo import (
     BLOCKED_EXPLANATION,
     DEMO_SUBJECT,
+    REFUSAL_FIELD,
+    REFUSAL_REASON,
+    REFUSAL_STATUS,
     SEEDED_CLIENT_SLUGS,
     DemonstrationMiddleware,
     DemoPrincipal,
     Verdict,
     control_disabled,
+    may_read_client,
     navigable,
     refused_route_names,
     verdict_for,
 )
 from molt.console.deps import Console, ConsoleSettings
 from molt.console.lambda_adapter import LambdaResponse, invoke
+from molt.console.routes import tenancy
 from molt.console.routing import (
     MUTATION_ROUTE_NAMES,
     ROUTE_TABLE,
+    Access,
     DemoDisposition,
     RouteSpec,
+    RouteTableError,
+    _validated,
 )
 from molt.store.capability import CapabilityRecord
 
@@ -86,7 +99,48 @@ class StubStore:
         return CapabilityRecord()
 
 
-def _console(*, demo_mode: bool) -> Console:
+# One seeded Client and one the seed corpus does not name. A narrowing that is not
+# applied is then visible as a row that came back rather than inferred from a roster
+# that was empty for some other reason.
+SEEDED_SLUG: Final[str] = min(SEEDED_CLIENT_SLUGS)
+OUTSIDE_SLUG: Final[str] = "a-client-a-real-engagement-created"
+SEEDED_ID: Final[UUID] = UUID(int=1)
+OUTSIDE_ID: Final[UUID] = UUID(int=2)
+_ROSTER_ROWS: Final[tuple[tuple[object, ...], ...]] = (
+    (SEEDED_ID, SEEDED_SLUG, SEEDED_SLUG),
+    (OUTSIDE_ID, OUTSIDE_SLUG, OUTSIDE_SLUG),
+)
+
+
+class RosterCursor(EmptyCursor):
+    """A cursor answering the Client roster read with both Clients, and nothing else.
+
+    Every other statement a view issues answers no rows, so what a view renders of
+    tenancy comes from the roster read alone and the assertion is about the roster.
+    """
+
+    def __init__(self) -> None:
+        self._rows: tuple[tuple[object, ...], ...] = ()
+
+    def execute(self, statement: str, parameters: object = ()) -> None:
+        del parameters
+        self._rows = _ROSTER_ROWS if statement == tenancy.CLIENT_ROSTER_STATEMENT else ()
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return list(self._rows)
+
+
+class RosterStore(StubStore):
+    """The stand-in store whose reads reach the roster-answering cursor."""
+
+    def read(self, body: Callable[[Any], object]) -> object:
+        return body(RosterCursor())
+
+
+def _console(*, demo_mode: bool, store: object | None = None) -> Console:
     root = Path(__file__).resolve().parents[2]
     settings = ConsoleSettings(
         host="127.0.0.1",
@@ -98,7 +152,7 @@ def _console(*, demo_mode: bool) -> Console:
     )
     return Console(
         settings=settings,
-        store=cast(Any, StubStore()),
+        store=cast(Any, StubStore() if store is None else store),
         credential=Credential(
             auth.credential_record(CREDENTIAL, iterations=2),
             source_name="test",
@@ -193,15 +247,20 @@ def test_a_blocked_route_is_refused_before_authentication_and_without_a_session(
     assert answer["statusCode"] == 403
 
 
-def test_a_blocked_route_with_no_written_handler_is_still_refused() -> None:
-    # `erase_start` and `approval_resolve` have no claimed view yet, so outside
-    # demonstration mode they answer 501 from the placeholder. That the demonstration
-    # answer is 403 rather than 501 is the whole point: the declaration is enforced
-    # before dispatch, so a view written later inherits the refusal.
+def test_a_blocked_route_with_no_written_handler_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every declared route now carries a claimed view, so the unclaimed case is made
+    # here rather than waited for: with the handler taken out of the registry the route
+    # answers 501 from the placeholder outside demonstration mode. That the
+    # demonstration answer is 403 rather than 501 is the whole point: the declaration is
+    # enforced before dispatch, so a view claimed later inherits the refusal the table
+    # declared for it rather than acquiring one of its own.
     from molt.console.routing import HANDLERS
 
     spec = _named("approval_resolve")
-    assert spec.name not in HANDLERS
+    assert spec.name in HANDLERS
+    monkeypatch.delitem(HANDLERS, spec.name)
     session, cookie = auth.issue(SESSION_KEY, now=NOW)
     permitted = _serve(
         spec,
@@ -311,3 +370,147 @@ def test_hidden_routes_are_left_out_of_the_navigation_and_not_refused() -> None:
         assert navigable(spec.name, demo_mode=False), spec.name
         assert verdict_for(spec.name, demo_mode=True) is Verdict.ALLOW, spec.name
     assert navigable("fleet", demo_mode=True)
+
+
+# -- the tenancy a demonstration visitor may read --------------------------
+
+
+def _text(answer: LambdaResponse) -> str:
+    """One answer's body as text, whichever way the adapter carried it."""
+    raw = cast(str, answer["body"])
+    if answer.get("isBase64Encoded") is True:
+        return base64.b64decode(raw).decode("utf-8", errors="replace")
+    return raw
+
+
+def test_the_roster_a_demonstration_serves_holds_only_the_seeded_clients() -> None:
+    # The narrowing is applied where the roster is produced, so it is asserted there:
+    # the cluster answers with a seeded Client and one a real engagement created, and
+    # what comes back in demonstration mode is the seeded one alone.
+    served = tenancy.client_roster(_console(demo_mode=True, store=RosterStore()))
+
+    assert {choice.slug for choice in served} == {SEEDED_SLUG}
+    assert OUTSIDE_SLUG not in {choice.slug for choice in served}
+    assert OUTSIDE_ID not in tenancy.permitted_ids(served, None)
+    assert tenancy.permitted_ids(served, None) == (SEEDED_ID,)
+
+
+def test_outside_demonstration_mode_the_roster_is_every_client_the_cluster_holds() -> None:
+    served = tenancy.client_roster(_console(demo_mode=False, store=RosterStore()))
+
+    assert {choice.slug for choice in served} == {SEEDED_SLUG, OUTSIDE_SLUG}
+    assert set(tenancy.permitted_ids(served, None)) == {SEEDED_ID, OUTSIDE_ID}
+
+
+def test_the_narrowing_predicate_is_the_seeded_set_and_the_identity_outside_the_mode() -> None:
+    assert may_read_client(SEEDED_SLUG, demo_mode=True)
+    assert not may_read_client(OUTSIDE_SLUG, demo_mode=True)
+    assert may_read_client(OUTSIDE_SLUG, demo_mode=False)
+
+
+def test_an_anonymous_demonstration_request_reads_no_client_outside_the_seeded_set() -> None:
+    # The whole path: no cookie at all, through the adapter, to a rendered view. The
+    # gate mints the demonstration session, the fleet view reads the roster, and the
+    # Client a real engagement created appears nowhere in what the visitor is served.
+    app = build_app(_console(demo_mode=True, store=RosterStore()))
+    answer = invoke(cast(Any, app), _event("GET", "/", headers={"accept": "text/html"}))
+    body = _text(answer)
+
+    assert answer["statusCode"] == 200
+    assert SEEDED_SLUG in body
+    assert OUTSIDE_SLUG not in body
+    assert str(OUTSIDE_ID) not in body
+
+
+def test_the_same_view_outside_demonstration_mode_still_serves_the_whole_roster() -> None:
+    # The narrowing is the mode's and nothing else's: an operator session outside the
+    # mode reads every Client the cluster holds, exactly as before.
+    app = build_app(_console(demo_mode=False, store=RosterStore()))
+    answer = invoke(
+        cast(Any, app),
+        _event("GET", "/", cookies=(_cookie(),), headers={"accept": "text/html"}),
+    )
+    body = _text(answer)
+
+    assert answer["statusCode"] == 200
+    assert SEEDED_SLUG in body
+    assert OUTSIDE_SLUG in body
+
+
+# -- no route that mutates is reachable in a demonstration -----------------
+
+
+def _mutating() -> tuple[RouteSpec, ...]:
+    """Every route the table declares as mutating, taken from the table itself."""
+    found = tuple(spec for spec in ROUTE_TABLE if spec.mutation)
+    assert found, "the table declares no mutating route, so nothing was crossed"
+    return found
+
+
+def _is_mode_refusal(answer: LambdaResponse) -> bool:
+    """Whether one answer is the mode's own refusal, judged on the field that says so."""
+    if answer["statusCode"] != REFUSAL_STATUS:
+        return False
+    payload = json.loads(_text(answer))
+    return isinstance(payload, dict) and payload.get(REFUSAL_FIELD) == REFUSAL_REASON
+
+
+def test_every_mutating_route_is_refused_in_a_demonstration_context() -> None:
+    # Requirement 25.12: a demonstration exposes no mutation route. Served twice per
+    # route, because the minted demonstration session supplies a valid CSRF token: a
+    # refusal that depended on the token being absent would not be the mode's.
+    session, cookie = auth.issue(SESSION_KEY, now=NOW)
+    carried = {
+        "cookies": (f"{auth.COOKIE_NAME}={cookie}",),
+        "headers": {"x-csrf-token": session.csrf_token},
+    }
+    for spec in _mutating():
+        anonymous = _serve(spec, demo_mode=True)
+        assert anonymous["statusCode"] == REFUSAL_STATUS, spec.name
+        assert _is_mode_refusal(anonymous), spec.name
+
+        credentialled = _serve(spec, demo_mode=True, **cast(Any, carried))
+        assert credentialled["statusCode"] == REFUSAL_STATUS, spec.name
+        assert _is_mode_refusal(credentialled), spec.name
+
+
+def test_the_refused_set_is_the_mutation_set_rather_than_a_subset_of_it() -> None:
+    assert refused_route_names() == {spec.name for spec in _mutating()}
+    assert refused_route_names() == {
+        spec.name for spec in ROUTE_TABLE if spec.demo is DemoDisposition.BLOCKED
+    }
+    # The two routes the old derivation left reachable: both mutate, so both are
+    # refused, and both keep the mutation declaration the CSRF classification reads.
+    for name in ("certificate_verify", "logout"):
+        spec = _named(name)
+        assert spec.mutation, name
+        assert spec.demo is DemoDisposition.BLOCKED, name
+        assert verdict_for(name, demo_mode=True) is Verdict.REFUSE, name
+        assert not navigable(name, demo_mode=True), name
+
+
+def test_a_mutating_route_declaring_a_reachable_disposition_is_refused_at_import() -> None:
+    # Why the two cannot drift again: the table itself will not hold a mutating route
+    # that carries a disposition the gate dispatches.
+    dispatched = (DemoDisposition.VISIBLE, DemoDisposition.READ_ONLY, DemoDisposition.HIDDEN)
+    for disposition in dispatched:
+        declared = (
+            RouteSpec(
+                name="a-mutation-declaring-a-reachable-disposition",
+                method="POST",
+                path="/a-mutating-path",
+                access=Access.SESSION,
+                demo=disposition,
+                mutation=True,
+                summary="a mutating route classified as though it were a read",
+            ),
+        )
+        with pytest.raises(RouteTableError):
+            _validated(declared)
+
+
+def test_every_route_left_reachable_in_a_demonstration_mutates_nothing() -> None:
+    for spec in ROUTE_TABLE:
+        if verdict_for(spec.name, demo_mode=True) is Verdict.REFUSE:
+            continue
+        assert not spec.mutation, spec.name

@@ -8,9 +8,18 @@ may see is the Client table itself; what a request may do is *narrow* that roste
 it narrows it by naming a slug that is matched against the rows the cluster returned.
 A parameter naming no roster row selects nothing, so a caller cannot widen its own
 tenancy by editing a query string, and every read a view then issues is scoped by a
-`client_id` that came from a roster row rather than from the caller. Read-only
-demonstration mode narrows the roster further, which is the demonstration middleware's
-own work rather than this module's.
+`client_id` that came from a roster row rather than from the caller.
+
+**Read-only demonstration mode narrows the roster here, at the one place tenancy is
+produced.** A demonstration serves an anonymous visitor, so the Clients it may read
+are the seeded tenants and nothing a real engagement created. That narrowing was
+declared on the demonstration principal and applied by nobody, which left the roster
+read answering with every Client the cluster holds. It is applied inside
+`client_roster` now, and the flag it is applied on is the console's own `demo_mode`
+rather than something a caller passes: `client_roster` already takes the `Console`, so
+no view has anything to thread and no view has an unnarrowed roster available to ask
+for. A view added later inherits the containment from the roster it is handed. Outside
+demonstration mode the roster is the Client table exactly as before.
 
 **A view renders through one helper.** The base layout wants the title, the mode flag,
 the authenticated flag, and the session's CSRF token on every page, and a view that
@@ -33,6 +42,7 @@ from starlette.responses import PlainTextResponse, Response
 from starlette.templating import Jinja2Templates
 
 from molt.console.app import console_of, session_of
+from molt.console.demo import may_read_client
 from molt.console.deps import COMPONENT, Console
 from molt.store import Cursor
 from molt.telemetry import Severity, log
@@ -78,11 +88,15 @@ class ClientChoice:
 
 
 def client_roster(console: Console) -> tuple[ClientChoice, ...]:
-    """The permitted Client set of this console, read from the cluster.
+    """The permitted Client set of this console, read from the cluster and then narrowed.
 
     A cluster that does not answer yields an empty roster rather than a failure, so a
     view renders an empty state and says the roster could not be read instead of
     returning a 500 that tells an operator less.
+
+    In read-only demonstration mode the rows the cluster answered are narrowed to the
+    seeded tenants before they are returned, so every view that reads tenancy inherits
+    the containment rather than each one remembering to ask for it.
     """
 
     def body(opened: Cursor) -> tuple[ClientChoice, ...]:
@@ -90,7 +104,7 @@ def client_roster(console: Console) -> tuple[ClientChoice, ...]:
         return tuple(_choice_of(row) for row in opened.fetchall())
 
     try:
-        return console.store.read(body)
+        read = console.read_only_store().read(body)
     except Exception as error:
         log(
             Severity.WARNING,
@@ -99,6 +113,28 @@ def client_roster(console: Console) -> tuple[ClientChoice, ...]:
             error_type=type(error).__name__,
         )
         return ()
+    return _permitted(read, demo_mode=console.demo_mode)
+
+
+def _permitted(roster: tuple[ClientChoice, ...], *, demo_mode: bool) -> tuple[ClientChoice, ...]:
+    """Keep the roster rows this deployment's posture permits reading.
+
+    Outside demonstration mode that is all of them: the console's principal is the
+    operator credential set and the roster is the Client table. Inside it, a Client the
+    seed corpus does not name is dropped here, which is what keeps a demonstration off
+    a tenant a real engagement created.
+    """
+    if not demo_mode:
+        return roster
+    narrowed = tuple(choice for choice in roster if may_read_client(choice.slug, demo_mode=True))
+    if len(narrowed) != len(roster):
+        log(
+            Severity.INFO,
+            COMPONENT,
+            "the Client roster was narrowed to the seeded tenants for a demonstration",
+            withheld=len(roster) - len(narrowed),
+        )
+    return narrowed
 
 
 def _choice_of(row: tuple[object, ...]) -> ClientChoice:
@@ -155,8 +191,14 @@ def templates_absent() -> Response:
 def render(request: Request, template: str, context: Mapping[str, object]) -> Response:
     """Render one view through the base layout, with the layout's own context filled in.
 
-    The title, the mode flag, the authenticated flag, and the CSRF token are added
-    here rather than by each view, so no page can be rendered missing one.
+    The title, the mode flag, the authenticated flag, and the CSRF token are added here
+    rather than by each view, so a view rendered through this helper cannot be missing one.
+
+    The route being served is deliberately *not* among them. It used to be, and that was the
+    defect: the layout marks the current navigation section from it, this helper is one of
+    two ways a view reaches a template, and the eight views that render directly therefore
+    highlighted nothing. The layout now reads it out of the request scope, where the
+    application binds it for every route, so no view supplies it and none can omit it.
     """
     templates = cast("Jinja2Templates | None", getattr(request.app.state, "molt_templates", None))
     if templates is None:

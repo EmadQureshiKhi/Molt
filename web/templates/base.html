@@ -1,19 +1,64 @@
 {#
   The one layout every console page extends.
 
-  Accessibility is structural here rather than added later: there is one skip link
-  to the main landmark, the navigation is a list of links, the mode banner is a
-  region with its own accessible name, and every interactive control in a page that
-  extends this layout is a native element with a visible label. Focus outlines are
-  never removed by the stylesheet, so tab order is always visible.
+  Accessibility is structural here rather than added later: there is one skip link to
+  the main landmark, the navigation is a list of links, the mode banner is a region with
+  its own accessible name, and every interactive control in a page that extends this
+  layout is a native element with a visible label. Focus outlines are never removed by
+  the stylesheet, so tab order is always visible.
+
+  The section being viewed is marked with `aria-current`, which is both what a screen
+  reader announces and what the stylesheet selects on, so the visible state and the
+  announced state cannot disagree.
+
+  The comparison reads the route name straight out of the request scope, where the
+  application binds it for every route it serves. That is the only place it is read from,
+  and it has to be: it was previously read from a context value that one shared render
+  helper filled in, and eight views render their template directly without that helper, so
+  those eight pages highlighted nothing at all. A value the layout needs on every page
+  cannot come from something a view may or may not call.
 #}
+{% set current_section = request.scope.get("route_name", "") %}
+{#
+
+  The navigation is declared as data below rather than as nine repeated list items. That
+  is not brevity for its own sake: the current-section comparison is written once against
+  it, and a section added to the list gets the marking without anyone remembering to add
+  it.
+
+  The document title separates the page from the product with a middle dot rather than a
+  dash. A dash reads as punctuation inside a sentence, so a tab labelled with one looks
+  like a fragment of prose that has been cut off; a dot reads as a separator, which is
+  what it is.
+#}
+{% set sections = [
+  ("/", "fleet", "Fleet"),
+  ("/lineage", "lineage", "Lineage"),
+  ("/residue", "residue", "Residue"),
+  ("/erase", "erase_console", "Erasure"),
+  ("/retention", "retention", "Retention"),
+  ("/sensitivity", "sensitivity", "Sensitivity"),
+  ("/procedures", "procedures", "Procedures"),
+  ("/tiers", "tiers", "Memory tiers"),
+  ("/approvals", "approvals", "Approvals"),
+] %}
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{{ title }} — Molt console</title>
+    {#
+      The scheme the page is actually drawn in, which is what makes the browser's own
+      chrome match it: a form control, a scrollbar, and a focus ring are drawn by the
+      platform from this declaration rather than from the stylesheet. It said dark while
+      the page was ink on paper, so every native control arrived dark on a light page.
+    #}
+    <meta name="color-scheme" content="light" />
+    <title>{{ title }} · Molt console</title>
+    <link rel="icon" type="image/png" sizes="256x256" href="/static/favicon.png" />
+    <link rel="apple-touch-icon" href="/static/favicon.png" />
     <link rel="stylesheet" href="/static/molt.css" />
+    <script src="/static/console.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to main content</a>
@@ -21,26 +66,29 @@
     {% if demo_mode %}
       <div class="banner" role="region" aria-label="Console mode">
         <p>
-          Read-only demonstration mode. Controls that would change stored memory are
-          shown disabled with an explanation rather than hidden.
+          This console is in read-only demonstration mode. Controls that would change
+          stored memory are shown disabled with an explanation rather than hidden.
         </p>
       </div>
     {% endif %}
 
     <header class="masthead">
-      <p class="wordmark">Molt console</p>
+      <a class="brand" href="/">
+        <img src="/static/molt-mark.png" alt="" />
+        <span class="brand-word">Molt <span>console</span></span>
+      </a>
+
       {% if authenticated %}
         <nav aria-label="Console sections">
           <ul>
-            <li><a href="/">Fleet</a></li>
-            <li><a href="/lineage">Lineage</a></li>
-            <li><a href="/residue">Residue</a></li>
-            <li><a href="/erase">Erasure</a></li>
-            <li><a href="/retention">Retention</a></li>
-            <li><a href="/sensitivity">Sensitivity</a></li>
-            <li><a href="/procedures">Procedures</a></li>
-            <li><a href="/tiers">Memory tiers</a></li>
-            <li><a href="/approvals">Approvals</a></li>
+            {% for path, name, label in sections %}
+              <li>
+                <a
+                  href="{{ path }}"
+                  {% if current_section == name %}aria-current="page"{% endif %}
+                >{{ label }}</a>
+              </li>
+            {% endfor %}
           </ul>
         </nav>
         <form method="post" action="/logout">
@@ -50,8 +98,14 @@
       {% endif %}
     </header>
 
+    {#
+      The heading, then one sentence saying what this page answers. The sentence is a block
+      a page fills rather than a value a route passes, so a page that has nothing to add
+      renders no empty element and no route had to be edited to gain one.
+    #}
     <main id="main">
       <h1>{{ title }}</h1>
+      {% block standfirst %}{% endblock %}
       {% block content %}{% endblock %}
     </main>
 
@@ -59,6 +113,7 @@
       <p>
         <a href="/spec">Interface specification</a>
         <a href="/health">Health</a>
+        <span>Durable, governable memory for AI coding agents</span>
       </p>
     </footer>
   </body>
