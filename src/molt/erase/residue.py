@@ -52,6 +52,18 @@ Sensitivity_Analyzer, and the tool server's residue tool all run this same walk
 with recording suppressed, so they read the corpus and report bands and distances
 without writing a row of any kind.
 
+**A recorded finding goes through the fence, and a recording pass cannot forget
+it.** A `residue_candidate` row is evidence about the run rather than memory
+content, and the fence's obligation covers evidence for the reason the run's other
+evidence writes carry it: a worker whose lease was taken over must not leave
+findings behind that a later run or a certificate would then account for. So the
+recording seam presents the generation its worker holds, read inside the finding
+write's own transaction, and a superseded worker records nothing. The generation is
+optional on the entry point and not on the recording path: a caller with no lease
+is a real caller here — the read-only exposures below have none and would have to
+invent one — but a caller that records is refused before the first read when it
+names no fence, so the omission cannot pass as a pass that simply found nothing.
+
 Both thresholds come from the configuration surface rather than from constants
 here, because an operator overrides them per run and a second spelling of a
 default is a second place a change can fail to reach.
@@ -80,6 +92,7 @@ from molt.store.embeddings import (
     index_served,
     select_nearest,
 )
+from molt.store.fencing import FIRST_GENERATION, fenced
 from molt.telemetry import Severity, log, metric
 
 __all__ = [
@@ -103,6 +116,7 @@ __all__ = [
     "Adjudicator",
     "CandidateFilter",
     "Classification",
+    "FindingFence",
     "NeighbourSearch",
     "QueryArtifact",
     "ResidueBand",
@@ -117,6 +131,7 @@ __all__ = [
     "select_query_artifacts",
     "store_candidate_filter",
     "store_neighbour_search",
+    "store_recorder",
     "uncandidated",
 ]
 
@@ -470,8 +485,37 @@ class ResidueReport:
         return frozenset(finding.artifact_id for finding in self.findings)
 
 
-# The two seams the walk reaches storage through. Both are callables rather than a
-# store handle so the walk is drivable with stubs, and both have a store-backed
+@dataclass(frozen=True, slots=True)
+class FindingFence:
+    """The tenant and the generation each recorded finding presents to the fence.
+
+    Carried as one value rather than as two parameters because the fence needs both
+    of them in the write's own transaction, and a caller that supplied one without
+    the other would read as a fenced write while guarding nothing. The generation
+    travels with the run rather than being read per finding, since the fence reads
+    the current generation inside each write's transaction and compares it against
+    this one; a caller that has been superseded therefore learns so at the write.
+
+    Attributes:
+        client_id: The tenant whose current lease the finding write is checked
+            against.
+        generation: The generation the recording worker believes it holds.
+    """
+
+    client_id: UUID
+    generation: int
+
+    def __post_init__(self) -> None:
+        """Refuse a fence whose generation names no lease that was ever granted."""
+        if self.generation < FIRST_GENERATION:
+            raise ValueError(
+                f"a presented fencing generation is at least {FIRST_GENERATION}, "
+                "so nothing below it names a lease a finding could be recorded under"
+            )
+
+
+# The three seams the walk reaches storage through. Each is a callable rather than
+# a store handle so the walk is drivable with stubs, and each has a store-backed
 # builder below so the wired-up path is the same walk.
 NeighbourSearch = Callable[[QueryArtifact, float, int], Sequence[Neighbour]]
 CandidateFilter = Callable[[Sequence[UUID]], frozenset[UUID]]
@@ -816,14 +860,21 @@ def store_candidate_filter(store: MemoryStore, run_id: UUID) -> CandidateFilter:
     return admitted
 
 
-def _store_recorder(store: MemoryStore, run_id: UUID) -> FindingRecorder:
-    """The recording seam, one finding to a serializable transaction."""
+def store_recorder(store: MemoryStore, run_id: UUID, fence: FindingFence) -> FindingRecorder:
+    """The recording seam, one finding to a fenced transaction.
+
+    The transaction is the fenced one rather than a plain serializable one. A
+    finding is evidence about the run, so the generation read runs on this write's
+    own cursor ahead of the insert, and a worker whose lease was taken over records
+    no row at all rather than a row a later run would account for. The refusal
+    propagates out of the walk, which is what ends the run that owned it.
+    """
 
     def write(finding: ResidueFinding) -> None:
         def body(cursor: Cursor) -> None:
             record_finding(cursor, run_id, finding)
 
-        store.in_serializable(body, label=_FINDING_LABEL)
+        fenced(store, fence.client_id, fence.generation, body, label=_FINDING_LABEL)
 
     return write
 
@@ -834,6 +885,7 @@ def detect_residue(
     policy: ResiduePolicy,
     *,
     permitted_clients: Sequence[UUID],
+    fence: FindingFence | None = None,
     adjudicator: Adjudicator | None = None,
     read_only: bool = False,
 ) -> ResidueReport:
@@ -847,11 +899,29 @@ def detect_residue(
         policy: The thresholds and bounds, resolved from configuration.
         permitted_clients: The Clients the neighbour query may return content
             for, which is the whole fleet on the erasure path.
+        fence: The tenant and the generation each recorded finding presents, which
+            a recording pass names and a read-only pass has no use for. Optional
+            because a caller holding no lease is a real caller — the read-only
+            exposures below hold none — and required in effect wherever anything
+            is recorded, by the refusal below.
         adjudicator: The Adjudicator, or None to take the fail-closed path for
             every review-band candidate.
         read_only: True suppresses recording entirely, so the pass reads the
             corpus and writes nothing.
+
+    Raises:
+        ValueError: The pass records findings and named no fence, so its writes
+            would guard nothing. Refused before the corpus is read at all, rather
+            than allowed to record unfenced evidence.
     """
+    recorder: FindingRecorder | None = None
+    if not read_only:
+        if fence is None:
+            raise ValueError(
+                "a residue pass that records findings presents the generation its "
+                "worker holds, so a recording pass names the fence it writes behind"
+            )
+        recorder = store_recorder(store, run_id, fence)
 
     def query_body(cursor: Cursor) -> tuple[QueryArtifact, ...]:
         return select_query_artifacts(
@@ -867,7 +937,7 @@ def detect_residue(
         neighbours=store_neighbour_search(store, permitted_clients=permitted_clients),
         uncandidated_ids=store_candidate_filter(store, run_id),
         adjudicator=adjudicator,
-        recorder=None if read_only else _store_recorder(store, run_id),
+        recorder=recorder,
     )
     report = detector.detect(queries)
     log(
@@ -896,6 +966,11 @@ def residue_report(
     server's residue tool call. It is the same walk with recording suppressed
     rather than a second implementation, so a reported band and a recorded band
     cannot come to mean different things.
+
+    No fence is named and none is needed: none of these three callers holds an
+    erasure lease, and because recording is suppressed there is no write for a
+    generation to guard. That is the whole reason the fence is optional rather than
+    demanded of every caller.
     """
     return detect_residue(
         store,

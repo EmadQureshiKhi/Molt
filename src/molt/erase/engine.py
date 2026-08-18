@@ -7,7 +7,7 @@ call, and what a run leaves behind when it cannot finish. This module is that, a
 nothing else — it sends the statements no phase owns, and it composes rather than
 reimplements every statement a phase does own.
 
-Eight claims carry the module.
+Nine claims carry the module.
 
 **No lease, no run.** Ownership is taken before the first mutation, and a refused
 acquisition ends the attempt with nothing written. The failure raised is the
@@ -36,29 +36,53 @@ wrapper, and every body is replayable: the candidate and disposition writes are
 idempotent by their unique constraints, the deletes are set-based, and the phase
 marker and the counters are assignments rather than increments.
 
-**The working tier is one number, not a record per row.** The tier is disposable by
-construction, so its erasure is one set-based delete for the tenant and the count it
-returned is recorded on the run row. Dispositions describe content that mattered; a
-working row is by definition content that did not.
+**The working tier is one number, not a record per row, and the delete carries the
+fence.** The tier is disposable by construction, so its erasure is one set-based
+delete for the tenant, and that delete and the count it returned commit in one
+fenced transaction: the deletion is a mutation of memory content, so it presents the
+generation this worker believes it holds, and a superseded owner removes no row and
+records no number. Dispositions describe content that mattered; a working row is by
+definition content that did not.
 
 **A backup failure ends the run before any memory content is touched.** The backup
 is secured between the run's own bookkeeping and the first statement that reaches
-memory content, so a run with no evidence of the cluster's prior state performs no
-deletion at all.
+memory content, which means before the working tier is purged as well as before
+phase three deletes anything, so a run with no evidence of the cluster's prior state
+performs no deletion at all.
 
-**Every evidence write goes through the fence, the completion included.** A worker
-superseded mid-run cannot record a disposition, cannot move the phase marker, and
-cannot declare the run finished. When a write is refused as stale the run ends with
-the aborted status and the evidence written under the valid generation stays exactly
-where it is: it was recorded by the owner that held the run at the time, so removing
-it would destroy true evidence to tidy up a false claim.
+**Every evidence write on this path goes through the fence, the completion
+included.** A worker superseded mid-run cannot purge the working tier, cannot record
+its backup evidence, cannot record phase one's candidate set, cannot record a
+residue finding, cannot extend that set with the residue phase's inclusions, cannot
+record a disposition, cannot move the phase marker, and cannot declare the run or
+its request finished. Two of those writes frame their own transactions inside the
+modules that own them — the backup record and the detector's per-finding recording —
+so this module hands each of those the generation it holds rather than reaching into
+them. What no fence can withhold is the backup statement itself, which runs outside
+every transaction because retrying it would issue a second backup: a superseded
+worker may still write a bucket, and what it cannot do is record that it did. When a
+write is refused as stale the run ends with the aborted status and the evidence
+written under the valid generation stays exactly where it is: it was recorded by the
+owner that held the run at the time, so removing it would destroy true evidence to
+tidy up a false claim.
+
+**A failure before phase one ends the run the same way a failure inside one does.**
+Every step between the run row and the first phase — the ownership record, the
+identity read, the backup, and the working purge — runs under a failure path that
+records the abort and re-raises, because a run row left at the running status
+refuses every binding write for that Client until something closes it. The one step
+this cannot cover is the insert of the run row itself: a failure there rolls back
+both of its statements, so there is no row to record an abort against and none to
+refuse a binding write either.
 
 **A dry run is the same skeleton with every memory-content mutation removed.** The
 working delete is skipped entirely, the sweep and the residue phase run unchanged
 because their writes are run-scoped evidence, phase three computes every decision
 and records every disposition and performs no delete, no body write, no vector
 replacement, and no attribution closure. What a dry run cannot produce is a
-certificate, because there is nothing it could truthfully certify.
+certificate, because there is nothing it could truthfully certify. It does acquire a
+lease, so that two rehearsals cannot write two candidate sets for one Client, and it
+gives that lease back on completion, so the run it rehearsed can start at once.
 
 Every statement here is a whole module-level literal with bound parameters; no
 identifier and no domain value is ever interpolated into statement text. Every
@@ -89,6 +113,7 @@ from molt.backup import (
     system_clock,
     take_backup,
 )
+from molt.confidence import ConfidencePolicy
 from molt.config.resolve import Configuration
 from molt.erase import adjudicator as adjudication
 from molt.erase import residue as semantic
@@ -118,7 +143,7 @@ from molt.erase.rewriter import (
     StructuralDiff,
     rewrite,
 )
-from molt.erase.sweep import SweepResult, run_sweep
+from molt.erase.sweep import SweepResult, sweep
 from molt.errors import (
     BackupFailedError,
     LeaseNotHeld,
@@ -135,6 +160,7 @@ from molt.store.attribution import SupersessionContext
 from molt.store.capability import CapabilityRecord
 from molt.store.erasure_lease import FinalisationRecord, LeaseInterval
 from molt.store.fencing import fenced, fenced_disposition, fenced_run_completion
+from molt.store.working import delete_client_scratch, record_working_purge
 from molt.telemetry import Severity, log, metric
 from molt.telemetry.inventory import UNIT_MILLISECONDS
 
@@ -206,8 +232,9 @@ RENEWAL_FRACTION: Final[int] = 3
 # reading a log record learns which boundary kept losing rather than only that the
 # run did.
 OPEN_RUN_LABEL: Final[str] = "erasure_open_run"
-WORKING_LABEL: Final[str] = "erasure_working_count"
+WORKING_LABEL: Final[str] = "erasure_working_purge"
 BACKUP_LABEL: Final[str] = "erasure_backup_on_run"
+SWEEP_LABEL: Final[str] = "erasure_sweep"
 PHASE_LABEL: Final[str] = "erasure_phase_marker"
 EXTEND_LABEL: Final[str] = "erasure_extend_candidates"
 DRY_DISPOSITION_LABEL: Final[str] = "erasure_dry_disposition"
@@ -249,7 +276,9 @@ INSERT_RUN_STATEMENT: Final[str] = (
     "VALUES (%s, %s, %s, %s, %s, %s, %s, now(), %s, %s)"
 )
 
-# T0b's accounting: one aggregate number for the whole working tier of the tenant.
+# The working purge's accounting: one aggregate number for the whole working tier of
+# the tenant, written in the same fenced transaction as the delete that produced it,
+# which runs after the backup rather than before it.
 WORKING_ROWS_STATEMENT: Final[str] = (
     "UPDATE erasure_run SET working_rows_deleted = %s WHERE id = %s AND client_id = %s"
 )
@@ -651,6 +680,7 @@ class ErasureEngine:
     """
 
     __slots__ = (
+        "_aborted",
         "_backup",
         "_generation",
         "_grant",
@@ -690,6 +720,10 @@ class ErasureEngine:
         self._generation = 0
         self._identity: ClientIdentity | None = None
         self._backup: BackupRecord | None = None
+        # Whether this run has already recorded its abort, so a failure that aborts
+        # with a detail of its own and then travels out through an enclosing handler
+        # is recorded once rather than twice.
+        self._aborted = False
 
     # -- the run ---------------------------------------------------------
 
@@ -704,10 +738,16 @@ class ErasureEngine:
             LeaseNotHeldError: This Client's erasure is owned by another worker, so
                 nothing was mutated. The failure names the current owner.
             BackupFailedError: No backup evidence could be secured, so no memory
-                content was touched.
+                content was touched: the backup precedes the working purge as well as
+                every phase. The run is recorded aborted.
             StaleFencingGenerationError: This owner was superseded mid-run. The run
                 is recorded aborted where the fence still admits that write, and the
                 evidence written under the valid generation is retained.
+            StoreError: The run could not be opened, or a step before phase one
+                failed. Everything from the ownership record onwards records the
+                aborted status before re-raising, so the run row does not stay at the
+                running status refusing this Client's binding writes; a failure of the
+                opening transaction itself leaves no run row at all.
         """
         recorded = finalisation_for(self._store, self._request.idempotency_key)
         if recorded is not None:
@@ -715,11 +755,38 @@ class ErasureEngine:
         self._grant = self._acquire()
         self._generation = self._grant.generation
         self._open_run()
-        self._identity = self._read_identity()
-        self._erase_working_tier()
-        self._secure_backup()
+        self._prelude()
         with _Renewer(self._store, self._grant, self._interval):
             return self._phases()
+
+    def _prelude(self) -> None:
+        """Everything between the run row and phase one, with every failure aborted.
+
+        These four steps used to sit outside every failure path, which left a run row
+        at the running status with nothing to close it whenever one of them failed —
+        and a running run row refuses every binding write for that Client for as long
+        as it stands. So they abort exactly as a phase does: record the aborted status
+        against the phase reached, then re-raise the failure that caused it. The lease
+        is not released and the evidence already written is kept, which is the rule
+        every abort on this path follows.
+
+        The backup records its own abort with the detail the backup path reported,
+        which is more than the type name this handler could name, so a second abort is
+        not recorded over it.
+        """
+        try:
+            register_run_ownership(self._store, self._held(), self._run_id)
+            self._identity = self._read_identity()
+            self._secure_backup()
+            self._erase_working_tier()
+        except StaleFencingGenerationError as refused:
+            self._abort_once(
+                f"a write before phase one was refused as stale: {type(refused).__name__}"
+            )
+            raise
+        except (StoreError, BackupFailedError, ModelUnavailableError, ValueError) as failure:
+            self._abort_once(f"the run could not reach phase one: {type(failure).__name__}")
+            raise
 
     def _phases(self) -> RunOutcome:
         """The three phases and the completion, with every failure ending the run."""
@@ -729,10 +796,10 @@ class ErasureEngine:
             self._dispose(report)
             return self._complete(swept, report)
         except StaleFencingGenerationError as refused:
-            self._abort(f"a mid-run write was refused as stale: {type(refused).__name__}")
+            self._abort_once(f"a mid-run write was refused as stale: {type(refused).__name__}")
             raise
         except (StoreError, ModelUnavailableError, ValueError) as failure:
-            self._abort(f"the run could not be completed: {type(failure).__name__}")
+            self._abort_once(f"the run could not be completed: {type(failure).__name__}")
             raise
 
     # -- T-1: ownership --------------------------------------------------
@@ -774,11 +841,21 @@ class ErasureEngine:
     # -- T0: the run's own bookkeeping -----------------------------------
 
     def _open_run(self) -> None:
-        """Insert the request and the run in one transaction, then record ownership.
+        """Insert the request and the run in one transaction, and record no abort for it.
 
         The run row is the conflict footprint concurrent binding writers read, which
         is why it is committed before any phase rather than written alongside the
         first one.
+
+        This is the one step of the run that no abort can cover, and it is covered by
+        the transaction instead: the request insert and the run insert are one
+        transaction, so a failure of either leaves neither row. There is therefore no
+        run row to record the aborted status against, and equally none at the running
+        status to refuse this Client's binding writes, so the failure is counted and
+        recorded as a terminal attempt and re-raised with nothing to close.
+
+        The ownership record is deliberately not sent here: it is the first step of the
+        prelude, which can abort, because by then the run row exists.
         """
 
         def body(cursor: Cursor) -> None:
@@ -807,8 +884,20 @@ class ErasureEngine:
                 ),
             )
 
-        self._store.in_serializable(body, label=OPEN_RUN_LABEL)
-        register_run_ownership(self._store, self._held(), self._run_id)
+        try:
+            self._store.in_serializable(body, label=OPEN_RUN_LABEL)
+        except (StoreError, ValueError):
+            self._count_run(ABORTED_OUTCOME)
+            log(
+                Severity.ERROR,
+                COMPONENT,
+                "an erasure run could not open, so neither of its rows exists and no "
+                "abort could be recorded against a run that was never inserted",
+                client_id=str(self._request.client_id),
+                run_id=str(self._run_id),
+                generation=self._generation,
+            )
+            raise
         log(
             Severity.INFO,
             COMPONENT,
@@ -819,33 +908,44 @@ class ErasureEngine:
             dry_run=self._request.dry_run,
         )
 
-    # -- T0b: the working tier -------------------------------------------
+    # -- the working tier, after the backup ------------------------------
 
     def _erase_working_tier(self) -> None:
         """Delete the tenant's working rows as one set, and record the count as one number.
 
         Skipped entirely on a dry run, so no Working_Memory row is touched by a pass
-        that promises to mutate no memory content. The delete frames its own
-        transaction inside the store, and the count it returned is recorded behind
-        the fence, because the number is evidence about the run and a superseded
-        owner records none.
+        that promises to mutate no memory content. The delete and the count it
+        returned are one fenced transaction rather than a delete framing its own and a
+        fenced write after it: the deletion is a mutation of memory content, so it
+        presents the generation this worker believes it holds, and a superseded owner
+        therefore removes no row and records no number. The purge statement is the one
+        the working tier owns, composed on this transaction's cursor rather than
+        restated here.
+
+        The measurement is emitted after the transaction committed, because the retry
+        wrapper may have run the body more than once and one commit produces one
+        count.
         """
         if self._request.dry_run:
             return
-        purged = self._store.purge_working_rows(self._request.client_id)
 
-        def body(cursor: Cursor) -> None:
+        def body(cursor: Cursor) -> int:
+            removed = delete_client_scratch(cursor, self._request.client_id)
             cursor.execute(
                 WORKING_ROWS_STATEMENT,
-                (purged, self._run_id, self._request.client_id),
+                (removed, self._run_id, self._request.client_id),
             )
+            return removed
 
-        fenced(
-            self._store,
+        purged = record_working_purge(
+            fenced(
+                self._store,
+                self._request.client_id,
+                self._generation,
+                body,
+                label=WORKING_LABEL,
+            ),
             self._request.client_id,
-            self._generation,
-            body,
-            label=WORKING_LABEL,
         )
         log(
             Severity.INFO,
@@ -861,9 +961,17 @@ class ErasureEngine:
     def _secure_backup(self) -> None:
         """Secure backup evidence before the first memory-content mutation, or abort.
 
+        This runs before the working purge as well as before every phase, so a run
+        that could secure no evidence of the cluster's prior state has deleted no
+        Working_Memory row either. Before, the purge ran first and a fatal backup
+        aborted a run whose working tier was already gone.
+
         The statement and the control-plane command both run outside every
-        transaction, and the recording write is its own short transaction, so
-        nothing is held open across either.
+        transaction, and the recording write is its own short fenced transaction,
+        so nothing is held open across either. The recording write carries the
+        fence because the row is evidence about the run and a certificate reads its
+        backup evidence out of it; the generation is available here because
+        ownership was taken before this step, ahead of every mutation.
         """
         issuer = self._seams.issuer or store_issuer(self._store)
         secured = take_backup(
@@ -875,11 +983,16 @@ class ErasureEngine:
             clock=self._seams.clock,
             skip=self._request.skip_backup,
         )
-        self._backup = record_backup(self._store, secured)
+        self._backup = record_backup(
+            self._store,
+            secured,
+            client_id=self._request.client_id,
+            generation=self._generation,
+        )
         self._record_backup_on_run(secured)
         if secured.fatal:
             detail = secured.detail or "no backup path succeeded"
-            self._abort(detail)
+            self._abort_once(detail)
             raise BackupFailedError(
                 "no pre-erasure backup evidence could be secured, so the run aborted "
                 "with every memory-content table unchanged"
@@ -910,8 +1023,27 @@ class ErasureEngine:
     # -- T1: the explicit sweep ------------------------------------------
 
     def _sweep(self) -> SweepResult:
-        """Phase one, in its own transaction, then the marker moves to phase two."""
-        swept = run_sweep(self._store, self._run_id, self._request.client_id)
+        """Phase one, in its own fenced transaction, then the marker moves to phase two.
+
+        The phase's statements are the sweep module's, composed on this transaction's
+        cursor rather than restated, and the transaction is the fenced one rather than
+        a plain serializable one: the candidate set, the run's Session record, and the
+        pending-embedding count are all evidence about the run, so a superseded owner
+        writes none of them. The recall floor is read from the run's own resolved
+        configuration rather than resolved again inside the phase.
+        """
+        floor = ConfidencePolicy.from_configuration(self._seams.configuration).recall_floor
+
+        def body(cursor: Cursor) -> SweepResult:
+            return sweep(cursor, self._run_id, self._request.client_id, recall_floor=floor)
+
+        swept = fenced(
+            self._store,
+            self._request.client_id,
+            self._generation,
+            body,
+            label=SWEEP_LABEL,
+        )
         self._advance(Phase.RESIDUE, swept.counts.total)
         return swept
 
@@ -923,13 +1055,23 @@ class ErasureEngine:
         The detector performs its own reads and its own recording transaction per
         finding, and the provider calls sit between them, so no transaction is open
         across a model call. What this adds is the second half of T2: the included
-        candidates enter the candidate set, set-based from the rows just recorded.
+        candidates enter the candidate set, set-based from the rows just recorded, and
+        that write is fenced, so a superseded owner extends no candidate set.
+
+        The detector's own per-finding recording is fenced too, on the generation
+        handed to it here. A `residue_candidate` row is evidence about the run, so a
+        superseded owner records none, and the refusal propagates out of the walk to
+        the phase handler above, which ends the run with the aborted status.
         """
         report = semantic.detect_residue(
             self._store,
             self._run_id,
             self._policy,
             permitted_clients=_fleet(self._store),
+            fence=semantic.FindingFence(
+                client_id=self._request.client_id,
+                generation=self._generation,
+            ),
             adjudicator=self._adjudicator(),
         )
 
@@ -939,7 +1081,13 @@ class ErasureEngine:
                 (self._run_id, SEMANTIC_RESIDUE_REASON, self._run_id),
             )
 
-        self._store.in_serializable(body, label=EXTEND_LABEL)
+        fenced(
+            self._store,
+            self._request.client_id,
+            self._generation,
+            body,
+            label=EXTEND_LABEL,
+        )
         self._advance(Phase.DISPOSITION, len(report.findings))
         return report
 
@@ -1152,8 +1300,15 @@ class ErasureEngine:
             generation=recorded.generation,
             dry_run=self._request.dry_run,
         )
-        if not self._request.dry_run:
-            release_lease(self._store, self._held())
+        # A completed run gives back the remainder of its window, and a dry run is a
+        # completed run. The lease exists to keep two workers from erasing one tenant
+        # at once; a dry run mutated no memory content, so there is nothing left for
+        # its window to protect. Holding it would block the very run the rehearsal was
+        # performed for, until the interval ran out on the cluster's clock — a lease
+        # cannot be re-taken by the same owner under a new attempt key. Only an
+        # aborting run keeps its window, and it keeps it by calling nothing at all, so
+        # a crashed worker and an aborted one release ownership by the same rule.
+        release_lease(self._store, self._held())
         return RunOutcome(
             client_id=self._request.client_id,
             status=RunStatus.COMPLETED,
@@ -1227,6 +1382,18 @@ class ErasureEngine:
 
     # -- the abort -------------------------------------------------------
 
+    def _abort_once(self, detail: str) -> None:
+        """Record the abort unless this run already recorded one.
+
+        The backup path aborts with the detail the backup itself reported, and the
+        failure it then raises travels out through the prelude's own handler, so
+        without this the same run would record two aborts and be counted twice. The
+        first detail is the specific one, so the first abort is the one that stands.
+        """
+        if self._aborted:
+            return
+        self._abort(detail)
+
     def _abort(self, detail: str) -> None:
         """Record the aborted status with the phase reached, and leave the lease alone.
 
@@ -1251,6 +1418,7 @@ class ErasureEngine:
                 ),
             )
 
+        self._aborted = True
         self._count_run(ABORTED_OUTCOME)
         try:
             fenced_run_completion(self._store, self._request.client_id, self._generation, body)
@@ -1276,12 +1444,23 @@ class ErasureEngine:
         )
 
     def _request_status(self, status: str) -> None:
-        """Follow the run's ending on the request the run answers."""
+        """Follow the run's ending on the request the run answers, behind the fence.
+
+        The status of the request is the run's own claim about what became of the
+        asking, so it is guarded by the same generation every other claim of this run
+        presents: a superseded owner declares neither the run nor its request finished.
+        """
 
         def body(cursor: Cursor) -> None:
             cursor.execute(REQUEST_STATUS_STATEMENT, (status, self._request_id))
 
-        self._store.in_serializable(body, label=REQUEST_LABEL)
+        fenced(
+            self._store,
+            self._request.client_id,
+            self._generation,
+            body,
+            label=REQUEST_LABEL,
+        )
 
     # -- shared state ----------------------------------------------------
 

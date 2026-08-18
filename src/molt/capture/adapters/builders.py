@@ -24,13 +24,25 @@ the Redactor, and it puts the pattern-table import on one line of one module.
 **The redaction import is deferred to the call.** The pattern table is the largest
 thing the capture path could load and a hook process that maps no payload never
 needs it, so it is imported inside the function that redacts rather than at module
-scope (Requirement 1.8).
+scope (Requirement 1.8). The telemetry import is deferred for the same reason and
+by the same means, so an adapter that builds no Event pays for neither.
+
+**Redaction being switched off is recorded here, once per Event.** With redaction
+disabled the Redactor returns the payload untouched and hands back the record the
+operator is owed; discarding it would leave five adapters transmitting unredacted
+payloads and text bodies with nothing anywhere saying so, which is the one outcome
+Requirement 4.6 exists to prevent. It is emitted where the payload is redacted, so
+one Event costs one record however many values the Redactor would have replaced
+and however large the payload is (Requirement 1.8), and the emission is contained
+so that reaching for the telemetry surface cannot become the way a capture hook
+fails its host agent (Requirement 1.7).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import suppress
 from typing import TYPE_CHECKING, Final
 from uuid import UUID, uuid4
 
@@ -42,11 +54,13 @@ if TYPE_CHECKING:  # pragma: no cover - imported for the annotations alone
     from molt.capture.protocol import CaptureContext, RecallResult
 
 __all__ = [
+    "COMPONENT",
     "DIGEST_NAME",
     "EXCERPT_LIMIT",
     "PAYLOAD_TEXT_CAP",
     "RECALL_EMPTY",
     "RECALL_HEADING",
+    "REDACTION_DISABLED_MESSAGE",
     "body_fields",
     "bounded_value",
     "clip",
@@ -59,6 +73,18 @@ __all__ = [
     "session_payload",
     "text_of",
 ]
+
+# The component name a record from this module carries. The same name the
+# decorator, the proxy, and the hook report, because Requirement 4.6 obliges one
+# record wherever redaction was skipped and an operator searching for it should not
+# have to know which of the capture paths produced the Event.
+COMPONENT: Final[str] = "capture"
+
+# The wording of that record, spelled once. It is the decorator's sentence with
+# *and text bodies* added, because this path carries both.
+REDACTION_DISABLED_MESSAGE: Final[str] = (
+    "redaction is disabled, so this Session's payloads and text bodies are recorded unmodified"
+)
 
 # How much text a payload field may carry before it is replaced by its length and
 # its digest. A hook payload can hold a whole file, and a Ledger row is not the
@@ -302,16 +328,29 @@ def json_bytes(document: JsonObject) -> bytes:
 
 
 def _redact_payload(ctx: CaptureContext, payload: JsonObject) -> tuple[JsonObject, bool]:
-    """Redact an assembled payload, reporting whether anything changed."""
+    """Redact an assembled payload, reporting whether anything changed.
+
+    The Redactor's warning is emitted rather than dropped. Every Event this module
+    builds passes through here, so the one record covers the text body as well and
+    no Event is transmitted unredacted without a record naming its Session.
+    """
     from molt.redact import RedactionSettings, redact_payload
 
     settings = ctx.redaction if ctx.redaction is not None else RedactionSettings()
     result = redact_payload(payload, session_id=ctx.session_id, settings=settings)
+    if result.warning is not None:
+        _note_redaction_disabled(ctx, result.warning.record)
     return result.payload, result.modified
 
 
 def _redact_text(ctx: CaptureContext, text: str | None) -> tuple[str | None, bool]:
-    """Redact a text body, reporting whether anything changed."""
+    """Redact a text body, reporting whether anything changed.
+
+    No record is emitted here. The text-redaction call reports the modification
+    and nothing else, and the payload call that precedes it on every Event has
+    already named the Session once, so emitting again would be the second record
+    for one Event that the latency budget does not want.
+    """
     if text is None:
         return None, False
     from molt.redact import RedactionSettings, redact_text
@@ -319,3 +358,29 @@ def _redact_text(ctx: CaptureContext, text: str | None) -> tuple[str | None, boo
     settings = ctx.redaction if ctx.redaction is not None else RedactionSettings()
     redacted, modified = redact_text(text, settings=settings)
     return redacted, modified
+
+
+def _note_redaction_disabled(ctx: CaptureContext, record: str) -> None:
+    """Record that this Session's content is being transmitted unmodified.
+
+    The severity, the component, and the two fields are the decorator's and the
+    proxy's, so the three capture paths write one record rather than three variants
+    of one and an operator greps for a single name.
+
+    Contained on purpose. A capture hook may never fail the host agent
+    (Requirement 1.7), and a process-wide telemetry surface that could not be
+    reached would otherwise make the warning about redaction being off the way an
+    adapter raises into its caller. Suppressing here means the worst case is the
+    record the Redactor already returned going unwritten, which is the state this
+    function exists to improve on rather than a state it can make worse.
+    """
+    with suppress(Exception):
+        from molt.telemetry import Severity, log
+
+        log(
+            Severity.WARNING,
+            COMPONENT,
+            REDACTION_DISABLED_MESSAGE,
+            record=record,
+            session_id=str(ctx.session_id),
+        )

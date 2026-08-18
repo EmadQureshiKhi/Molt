@@ -43,6 +43,16 @@ a measurement, and a log record, and the caller proceeds. That is Requirement
 13.8 read as what it is: the hook returns an empty injection and exits zero, which
 it can only do if this module declines to raise.
 
+**The query text is redacted before it is recorded.** The recall Event carries the
+text the caller asked with, and that text is whatever a person put in a prompt,
+which is the one place in this system a secret arrives as ordinary prose. It goes
+through the Redactor on its way into the payload and the Event's flag is set from
+what the Redactor reported, because the Ledger is append-only and no role holds
+`UPDATE`: text written here leaves only by an erasure or by expiry, so the write
+is the last moment redaction can happen at all (Requirement 4.1). With redaction
+switched off the text passes through and the record naming the Session is written,
+since the Redactor reaches no telemetry surface of its own (Requirement 4.6).
+
 **What the page trades for being index-served, stated rather than hidden.** On
 this cluster a predicate on any column other than the vector takes the plan off
 the distributed vector index — the index is created over the vector alone, with no
@@ -83,6 +93,11 @@ from molt.models.event import (
     JsonObject,
     JsonValue,
     format_timestamp,
+)
+from molt.redact import (
+    REDACTION_DISABLED_RECORD,
+    RedactionSettings,
+    redact_text,
 )
 from molt.store import MemoryStore
 from molt.store.chain import LedgerAppend, append
@@ -302,6 +317,7 @@ class RecallEngine:
         "_halt",
         "_limit",
         "_recorder",
+        "_redaction",
         "_store",
     )
 
@@ -316,6 +332,7 @@ class RecallEngine:
         retrievals: RetrievalRecorder | None = None,
         halt: HaltObserver | None = None,
         clock: Callable[[], datetime] | None = None,
+        redaction: RedactionSettings | None = None,
     ) -> None:
         self._store = store
         self._embedder = embedder
@@ -325,6 +342,7 @@ class RecallEngine:
         self._recorder = self._track if retrievals is None else retrievals
         self._halt = halt
         self._clock = clock if clock is not None else _now
+        self._redaction = RedactionSettings() if redaction is None else redaction
 
     @classmethod
     def from_configuration(
@@ -352,6 +370,13 @@ class RecallEngine:
             retrievals=retrievals,
             halt=halt,
             clock=clock,
+            redaction=RedactionSettings(
+                disabled=configuration.flag("MOLT_REDACTION_DISABLED"),
+                max_depth=configuration.integer("MOLT_REDACTION_MAX_DEPTH"),
+                sensitive_names=frozenset(
+                    configuration.text_list("MOLT_REDACTION_SENSITIVE_NAMES")
+                ),
+            ),
         )
 
     @property
@@ -553,12 +578,33 @@ class RecallEngine:
         The Event belongs to the asking Session, so a query raised with no Session
         records none: an Event needs a Session and a Client, and inventing either
         would put a claim in the Ledger that the hash chain then attests to.
+
+        The query text is redacted before it is placed in the payload, and the
+        Event's flag is set from what the Redactor reported rather than asserted.
+        This is the one content-bearing field the recall path writes, and it is the
+        one a person types: a credential pasted into a prompt reaches this function
+        as ordinary text, and the Ledger is append-only with no role holding
+        `UPDATE`, so a secret written here is removable only by an erasure or by
+        expiry (Requirement 4.1). The other four payload fields are identifiers,
+        distances, and counts, which carry no content to redact.
         """
         if scope is None or session_id is None:
             return
         moment = self._clock()
+        redacted_query, query_modified = redact_text(query_text, settings=self._redaction)
+        if self._redaction.disabled:
+            # The Redactor reaches no telemetry surface, so the record it would
+            # otherwise owe is written here, naming the Session whose query text is
+            # about to be recorded as it arrived (Requirement 4.6).
+            log(
+                Severity.WARNING,
+                COMPONENT,
+                "redaction is disabled, so this Session's query text is recorded unmodified",
+                record=REDACTION_DISABLED_RECORD,
+                session_id=str(session_id),
+            )
         payload: dict[str, JsonValue] = {
-            _PAYLOAD_QUERY: query_text,
+            _PAYLOAD_QUERY: redacted_query,
             _PAYLOAD_IDENTIFIERS: [str(result.artifact_id) for result in results],
             _PAYLOAD_DISTANCES: [result.distance for result in results],
             _PAYLOAD_LIMIT: bound,
@@ -575,7 +621,7 @@ class RecallEngine:
                 machine_id=scope.machine_id,
                 parent_event_id=None,
                 payload=payload,
-                redacted=False,
+                redacted=query_modified,
                 text_body=None,
             ),
             expires_at=moment + scope.retention,

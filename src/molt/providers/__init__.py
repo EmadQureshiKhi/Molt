@@ -50,6 +50,7 @@ __all__ = [
     "ProbeLike",
     "Prompt",
     "PromptLike",
+    "ProviderEmbedder",
     "ProviderProbe",
     "TextProvider",
     "TextResult",
@@ -252,3 +253,33 @@ class TextProvider(Protocol):
     def probe(self) -> ProbeLike:
         """Report reachability and the prompt-cache capability the selector records."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEmbedder:
+    """The one-call query-embedding surface, over a selected embedding provider.
+
+    Three components declare the narrow surface they need — one vector for one text —
+    rather than importing a provider, which is what keeps the dependency pointing one
+    way. This is the adapter from the wider provider interface onto that surface, held
+    in one place so no caller writes it again.
+
+    It lives beside the interface it adapts rather than beside one of its callers. It
+    began in the command-line helpers, which is where its first two callers were, and
+    that placement was invisible until a third caller arrived from the other direction:
+    the deployed ingest function serves recall too, and reaching a command-line helper
+    from a deployed function would import the verb machinery into a cold start to obtain
+    one method.
+
+    The mismatch it absorbs is a single method name, and that made it easy to miss. The
+    recall engine's protocol names one call and every provider names another, so no real
+    provider satisfies the protocol directly and only a stub written to the protocol
+    does. That is exactly the gap a deployed recall fell into: the engine attached, the
+    call was made, and the attribute did not exist.
+    """
+
+    provider: EmbeddingProvider
+
+    def embed_texts(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        """One vector per text, in the input order."""
+        return self.provider.embed(texts)

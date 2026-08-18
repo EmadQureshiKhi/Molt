@@ -24,9 +24,11 @@ being touched at all (Requirement 47.3). Their two absences are separate causes
 because an operator reading a rejection needs to know which header a caller is
 failing to send.
 
-**Every rejection is one exception and one measurement.** Each of the four causes
-raises `IngressRejectedError` and emits `collector.signature_rejected`, and the
-caller answers all four with the same status and the same body, so the response
+**Every refusal is one exception and one measurement, with no exceptions.** Each
+of the four causes raises `IngressRejectedError` and emits
+`collector.signature_rejected`, and so does the one refusal that is not a caller's
+fault at all — a deployment holding no shared value, which can verify nobody. The
+caller answers them all with the same status and the same body, so the response
 distinguishes them no more than a constant-time comparison does (Requirements
 47.4, 47.5, 47.7, 47.8, 47.13). The cause is named in the log record rather than
 in the response and rather than in a metric dimension: the metric is undimensioned
@@ -35,13 +37,17 @@ combination out of the ten the telemetry surface admits instead of four, and the
 question *which cause* is answered by a record that is not billed. Nothing written
 out names the computed digest, the presented digest, or the shared value.
 
-**The age bound is an absolute difference and is inclusive on the accepted side.**
-A timestamp as far in the future as the bound allows is as admissible as one that
-far in the past, and one further out in either direction is refused: a request
-whose age *exceeds* the configured maximum is rejected, so a difference of exactly
-the maximum is accepted and anything beyond it is not (Requirements 47.5, 47.6).
-That matches the inclusive convention the request-size bound already states, so
-one reading of *maximum* covers both bounds.
+**The age bound runs backwards from the presented instant, not around it.** A
+timestamp behind the reading is admitted up to and including the configured
+maximum age, so a difference of exactly the maximum is accepted and anything
+staler is not (Requirements 47.5, 47.6). Ahead of the reading only
+`CLOCK_SKEW_ALLOWANCE_S` is admitted, because a request stamped further into the
+future than that is not yet stale by any measure and stays admissible until the
+reading reaches its timestamp — and then for the whole of the maximum age
+afterwards. Admitting the future timestamp is what would widen the replayable
+window to twice the configured maximum, so it is refused. The admitted window is
+the configured maximum plus the allowance, which at the default is 305 seconds and
+not 600.
 
 **A present-but-unreadable timestamp is refused as an out-of-window timestamp.**
 It is not the absent-header cause, because the header arrived. It is not the
@@ -88,6 +94,7 @@ from molt.models.event import parse_timestamp, require_aware
 from molt.telemetry import Severity, log, metric
 
 __all__ = [
+    "CLOCK_SKEW_ALLOWANCE_S",
     "COMPONENT",
     "SIGNATURE_REJECTED_METRIC",
     "RejectionCause",
@@ -105,6 +112,18 @@ COMPONENT: Final[str] = "collector"
 # however much traffic arrives.
 SIGNATURE_REJECTED_METRIC: Final[str] = "collector.signature_rejected"
 
+# How far ahead of this process's reading a presented timestamp may sit.
+#
+# This is the whole of the future the verifier admits, and it is small on purpose.
+# The bound is measured against the Collector host's reading while the timestamp
+# was stamped on the capture host, so the two disagree by whatever their clock
+# synchronisation leaves; both are platform-synchronised, which leaves
+# milliseconds. Five seconds is a wide multiple of that and a sixtieth of the
+# default maximum age, so it covers ordinary skew without materially widening the
+# window a captured request is replayable in: the admitted window is the
+# configured maximum age plus this allowance, and nothing beyond it is accepted.
+CLOCK_SKEW_ALLOWANCE_S: Final[int] = 5
+
 
 class RejectionCause(StrEnum):
     """The four causes Requirement 47.13 counts, told apart in the log record.
@@ -112,6 +131,15 @@ class RejectionCause(StrEnum):
     They are named rather than described so an operator reads one vocabulary and
     a test asserts against a name rather than against a sentence. All four are one
     status and one response body to the caller.
+
+    A deployment holding no shared value is refused under `MISMATCH` rather than
+    under a fifth member. It is not a fifth cause of Requirement 47.13, which
+    enumerates criteria 4, 5, 7, and 8 and no more, and a member outside that
+    enumeration would make this vocabulary mean two different things at once. What
+    the refusal has in common with `MISMATCH` is what the caller is told and what
+    was established: no presented signature was shown to be the computed one. The
+    record's `detail` names the deployment fault exactly, so an operator reading
+    the record is not sent looking at the caller.
     """
 
     TIMESTAMP_ABSENT = "timestamp_header_absent"
@@ -149,18 +177,20 @@ def verify_ingress(
             content, because that is what the signature covers.
         key: The shared value the digest is keyed with, revealed by the caller for
             the length of this call alone.
-        max_age_s: The configured maximum request age in seconds. A difference of
-            exactly this much is accepted.
+        max_age_s: The configured maximum request age in seconds. A timestamp
+            exactly this stale is accepted; a timestamp ahead of the reading is
+            accepted only as far as `CLOCK_SKEW_ALLOWANCE_S`.
         now: The reading the age bound is measured against, or None to take the
             host's. An injected reading must carry an offset, for the same reason
             a presented one must.
 
     Raises:
         IngressRejectedError: The timestamp header was absent, the signature
-            header was absent, the presented timestamp fell outside the age
-            bound or named no instant, or the presented signature did not match
-            the computed one. Nothing was read from the body in the first two
-            cases, and nothing is persisted in any of them.
+            header was absent, no shared value was available to verify with, the
+            presented timestamp fell outside the admitted window or named no
+            instant, or the presented signature did not match the computed one.
+            Nothing was read from the body in the first two cases, and nothing is
+            persisted in any of them.
     """
     presented_timestamp = headers.get(TIMESTAMP_HEADER)
     presented_signature = headers.get(SIGNATURE_HEADER)
@@ -169,9 +199,14 @@ def verify_ingress(
     if presented_signature is None:
         _reject(RejectionCause.SIGNATURE_ABSENT, "the request presented no signature header")
     if not key:
-        raise IngressRejectedError(
+        # Through the same helper as every other refusal, so this path counts and
+        # records rather than raising past both (Requirement 47.13). A refusal that
+        # emitted neither would leave a deployment that can verify nobody looking
+        # exactly like one nobody is calling.
+        _reject(
+            RejectionCause.MISMATCH,
             "no ingress shared value is available, so no signature could be verified "
-            "and the request was refused"
+            "and the request was refused",
         )
 
     _require_inside_window(presented_timestamp, max_age_s, _reading(now))
@@ -186,10 +221,17 @@ def verify_ingress(
 def _require_inside_window(presented: str, max_age_s: int, reading: datetime) -> None:
     """Refuse a timestamp the age bound does not cover, or one naming no instant.
 
-    The difference is taken in absolute value, so a timestamp too far ahead of the
-    reading is as rejectable as one too far behind it: a caller whose clock runs
-    fast is presenting a request that will still be replayable when the reading
-    catches up, which is the window the bound exists to close.
+    The window runs backwards from the presented instant. An age up to and
+    including the configured maximum is admitted; a negative age — a timestamp
+    ahead of the reading — is admitted only as far as `CLOCK_SKEW_ALLOWANCE_S`.
+
+    The asymmetry is the point. A request stamped a full maximum age into the
+    future is not stale by any measure, stays admissible while the reading climbs
+    towards its timestamp, and is then admissible for the whole maximum age after
+    the reading passes it. Admitting it is what makes the real replayable window
+    twice the configured maximum instead of the maximum. The allowance is what an
+    ordinary clock disagreement needs and nothing more, so the admitted window is
+    the configured maximum plus the allowance and is stated as such in the record.
     """
     try:
         moment = parse_timestamp(presented)
@@ -199,12 +241,13 @@ def _require_inside_window(presented: str, max_age_s: int, reading: datetime) ->
             "the presented timestamp names no instant, so no age could be established",
             max_age_seconds=max_age_s,
         )
-    age = abs((reading - moment).total_seconds())
-    if age > float(max_age_s):
+    age = (reading - moment).total_seconds()
+    if age > float(max_age_s) or age < -float(CLOCK_SKEW_ALLOWANCE_S):
         _reject(
             RejectionCause.OUTSIDE_WINDOW,
             "the presented timestamp lies outside the configured maximum request age",
             max_age_seconds=max_age_s,
+            skew_allowance_seconds=CLOCK_SKEW_ALLOWANCE_S,
             presented_age_seconds=int(age),
         )
 

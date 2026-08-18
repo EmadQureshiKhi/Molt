@@ -62,6 +62,9 @@ __all__ = [
     "INSERT_APPROVAL_STATEMENT",
     "INSERT_MATCH_STATEMENT",
     "PENDING_APPROVALS_QUERY",
+    "QUEUE_ENTRY_QUERY",
+    "QUEUE_LIST_QUERY",
+    "QUEUE_PAGE_LIMIT",
     "REDELIVERY_DEDUPLICATED_KINDS",
     "RESOLVE_APPROVAL_STATEMENT",
     "SESSION_HALT_QUERY",
@@ -70,10 +73,13 @@ __all__ = [
     "ApprovalStatus",
     "Clock",
     "PendingApproval",
+    "QueuedApproval",
     "ResolvedApproval",
     "SessionHalt",
     "apply_outcomes",
     "pending_approvals",
+    "queued_approval",
+    "queued_approvals",
     "resolve_approval",
     "session_halt",
     "system_clock",
@@ -146,10 +152,45 @@ PENDING_APPROVALS_QUERY: Final[str] = (
     "ORDER BY created_at ASC, id ASC"
 )
 
+# What an operator is shown: the queue of one tenant set, whatever each entry's
+# standing. A resolved entry stays on the list because the principal, the decision,
+# and the instant are the evidence that the entry was answered, and a list that
+# dropped them would leave nowhere to read that from. Tenancy is inside the
+# statement: the entry's Session names the Client, so an entry outside the bound
+# identifier set is not selected rather than selected and then filtered. Pending
+# entries lead, because those are the rows an operator came to act on, and the
+# `approval_pending` index is what serves that half of the ordering.
+QUEUE_LIST_QUERY: Final[str] = (
+    "SELECT a.id, a.rule_id, r.name, r.action, a.session_id, s.client_id, a.event_id, "
+    "a.status, a.created_at, a.resolved_by, a.decision, a.resolved_at "
+    "FROM approval_queue AS a "
+    "JOIN policy_rule AS r ON r.id = a.rule_id "
+    "JOIN session AS s ON s.id = a.session_id "
+    "WHERE s.client_id = ANY (%s::UUID[]) "
+    "ORDER BY a.status ASC, a.created_at ASC, a.id ASC LIMIT %s"
+)
+
+# One entry, admitted by the same tenancy predicate. A resolution reads this first,
+# so an entry whose Session belongs to no bound Client is answered as absent rather
+# than resolved by a principal that may not see it.
+QUEUE_ENTRY_QUERY: Final[str] = (
+    "SELECT a.id, a.rule_id, r.name, r.action, a.session_id, s.client_id, a.event_id, "
+    "a.status, a.created_at, a.resolved_by, a.decision, a.resolved_at "
+    "FROM approval_queue AS a "
+    "JOIN policy_rule AS r ON r.id = a.rule_id "
+    "JOIN session AS s ON s.id = a.session_id "
+    "WHERE a.id = %s AND s.client_id = ANY (%s::UUID[])"
+)
+
 # What the halt columns read back as, for a caller asserting the marker landed.
 SESSION_HALT_QUERY: Final[str] = (
     "SELECT halted, halted_at, halt_reason, halt_rule_id FROM session WHERE id = %s"
 )
+
+# How many entries one page of the queue carries. A bound rather than a caller's
+# choice, because an unbounded queue read is a scan of every approval a long-lived
+# fleet ever raised.
+QUEUE_PAGE_LIMIT: Final[int] = 100
 
 # The transaction labels the two writes appear under.
 _APPLY_LABEL: Final[str] = "policy_apply"
@@ -159,6 +200,7 @@ _RESOLVE_LABEL: Final[str] = "approval_resolve"
 _PENDING_ROW_WIDTH: Final[int] = 5
 _HALT_ROW_WIDTH: Final[int] = 4
 _RESOLVED_ROW_WIDTH: Final[int] = 8
+_QUEUED_ROW_WIDTH: Final[int] = 12
 
 # The time source a resolution instant and the bound measurement are read from,
 # injected so no recorded instant is a reading of whichever machine ran.
@@ -216,6 +258,36 @@ class PendingApproval:
     session_id: UUID
     event_id: UUID | None
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedApproval:
+    """One queue entry as an operator reads it, whatever its standing.
+
+    The rule is carried by name and by action rather than by identifier alone,
+    because what an operator decides about is the rule that asked, and the three
+    resolution columns stay optional: a pending entry names no principal, no
+    decision, and no instant, and rendering a default for any of them would state a
+    decision nobody made.
+    """
+
+    id: UUID
+    rule_id: UUID
+    rule_name: str
+    action: str
+    session_id: UUID
+    client_id: UUID
+    event_id: UUID | None
+    status: ApprovalStatus
+    created_at: datetime
+    resolved_by: str | None = None
+    decision: ApprovalDecision | None = None
+    resolved_at: datetime | None = None
+
+    @property
+    def pending(self) -> bool:
+        """Whether this entry is still awaiting an operator."""
+        return self.status is ApprovalStatus.PENDING
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,6 +561,63 @@ def pending_approvals(store: MemoryStore, session_id: UUID) -> tuple[PendingAppr
     return store.read(body)
 
 
+def queued_approvals(
+    store: MemoryStore,
+    client_ids: Sequence[UUID],
+    *,
+    limit: int = QUEUE_PAGE_LIMIT,
+) -> tuple[QueuedApproval, ...]:
+    """The queue of one tenant set, pending entries first and oldest first inside each.
+
+    This is what the console's queue list renders. The Client set is bound into the
+    statement rather than applied to its answer, so an entry belonging to a Session of
+    another tenant is never read at all. An empty set reads nothing, because a read
+    scoped to no tenant can only return rows that are outside every tenant it was
+    meant to be scoped by.
+
+    Args:
+        store: The connection surface the read is issued on.
+        client_ids: The Clients an operator may see, from the roster rather than from
+            a request.
+        limit: How many entries one page carries.
+
+    Returns:
+        The entries, pending first, each naming the rule that raised it.
+
+    Raises:
+        ValueError: The page bound is not positive, so it would describe no page.
+    """
+    if limit <= 0:
+        raise ValueError("a queue page carries a positive number of entries")
+    if not client_ids:
+        return ()
+
+    def body(cursor: Cursor) -> tuple[QueuedApproval, ...]:
+        cursor.execute(QUEUE_LIST_QUERY, (list(client_ids), limit))
+        return tuple(_queued_of(row) for row in cursor.fetchall())
+
+    return store.read(body)
+
+
+def queued_approval(
+    store: MemoryStore, approval_id: UUID, client_ids: Sequence[UUID]
+) -> QueuedApproval | None:
+    """One entry of the queue, or None where no bound Client's Session holds it.
+
+    A resolution reads this before it writes, so an entry outside the permitted tenant
+    set is answered as absent rather than resolved.
+    """
+    if not client_ids:
+        return None
+
+    def body(cursor: Cursor) -> tuple[object, ...] | None:
+        cursor.execute(QUEUE_ENTRY_QUERY, (approval_id, list(client_ids)))
+        return cursor.fetchone()
+
+    row = store.read(body)
+    return None if row is None else _queued_of(row)
+
+
 def session_halt(store: MemoryStore, session_id: UUID) -> SessionHalt | None:
     """The halt columns of one Session, or None where no such Session is stored."""
 
@@ -559,6 +688,38 @@ def _pending_of(row: Sequence[object]) -> PendingApproval:
         event_id=_optional_uuid(columns[3], "event_id"),
         created_at=_instant(columns[4], "created_at"),
     )
+
+
+def _queued_of(row: Sequence[object]) -> QueuedApproval:
+    """Build one queue entry from a stored row, refusing a vocabulary the schema forbids."""
+    columns = _checked(row, _QUEUED_ROW_WIDTH, "queued approval")
+    decision = columns[10]
+    principal = columns[9]
+    if principal is not None and not isinstance(principal, str):
+        raise ValueError("the column resolved_by did not return text")
+    if decision is not None and not isinstance(decision, str):
+        raise ValueError("the column decision did not return text")
+    return QueuedApproval(
+        id=_uuid(columns[0], "id"),
+        rule_id=_uuid(columns[1], "rule_id"),
+        rule_name=_text(columns[2], "name"),
+        action=_text(columns[3], "action"),
+        session_id=_uuid(columns[4], "session_id"),
+        client_id=_uuid(columns[5], "client_id"),
+        event_id=_optional_uuid(columns[6], "event_id"),
+        status=ApprovalStatus(_text(columns[7], "status")),
+        created_at=_instant(columns[8], "created_at"),
+        resolved_by=principal,
+        decision=None if decision is None else ApprovalDecision(decision),
+        resolved_at=None if columns[11] is None else _instant(columns[11], "resolved_at"),
+    )
+
+
+def _text(value: object, what: str) -> str:
+    """One text column, refusing anything that is not text."""
+    if isinstance(value, str):
+        return value
+    raise ValueError(f"the column {what} did not return text")
 
 
 def _resolved_of(row: Sequence[object]) -> ResolvedApproval:

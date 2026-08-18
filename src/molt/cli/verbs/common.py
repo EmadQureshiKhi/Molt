@@ -11,15 +11,20 @@ written under it.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Final
 from uuid import UUID, uuid4
 
 from molt.cli.context import VerbContext
 from molt.lifecycle import Closeable, current_termination, install_signal_handlers
-from molt.providers import EmbeddingProvider
+
+# The query-embedding adapter now lives beside the interface it adapts rather than here,
+# and is re-exported under its original name so this module's callers are unchanged. The
+# move was needed because a third caller arrived from the other direction: the deployed
+# ingest function serves recall too, and reaching a command-line helper from a deployed
+# function would import the verb machinery into a cold start to obtain one method.
+from molt.providers import ProviderEmbedder
 
 __all__ = [
     "AUTO_INCLUDE_KEY",
@@ -91,20 +96,3 @@ def serving(pool: Closeable) -> Iterator[None]:
 def synthetic_run_id() -> UUID:
     """An identifier for a pass that writes nothing, so it names no stored run."""
     return uuid4()
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderEmbedder:
-    """The query-embedding surface, over a selected Embedding_Provider.
-
-    The recall path and the tool server both declare the narrow one-call surface
-    they need rather than importing a provider, which is what keeps the dependency
-    pointing one way. This is the adapter from the wider provider interface onto
-    that surface, held in one place so neither caller writes it again.
-    """
-
-    provider: EmbeddingProvider
-
-    def embed_texts(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
-        """One vector per text, in the input order."""
-        return self.provider.embed(texts)

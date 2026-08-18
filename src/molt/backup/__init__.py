@@ -36,6 +36,17 @@ what lets the recording discipline be driven exhaustively in process, and it is
 why the subprocess form is a small function at the edge rather than a call buried
 in the decision.
 
+**The row this module writes is evidence about the run, so it goes through the
+fence.** A certificate reads its backup evidence out of this table, which is why a
+worker whose lease was taken over must not be able to leave a row here: afterwards
+that row is indistinguishable from one the owner that really held the run recorded.
+The recording write therefore presents the generation its worker holds, read inside
+that write's own transaction. What the fence cannot withhold is
+the backup itself. The statement and the control-plane command run outside every
+transaction, by design, since retrying a body that framed one would issue a second
+backup; a superseded worker can therefore still write a bucket, and what it cannot
+do is claim it.
+
 The control-plane command is always invoked as an argument vector and never as a
 shell string, and the vector is recorded verbatim in machine-readable form so the
 claim is reproducible. Nothing here interpolates a caller value into statement
@@ -58,9 +69,11 @@ from uuid import UUID
 from molt.config.resolve import Configuration
 from molt.store import Cursor, MemoryStore
 from molt.store.capability import SELF_MANAGED_BACKUP, CapabilityRecord
+from molt.store.fencing import fenced
 from molt.telemetry import Severity, log
 
 __all__ = [
+    "BACKUP_RECORD_LABEL",
     "BACKUP_RECORD_STATEMENT",
     "CCLOUD_BINARY_KEY",
     "CCLOUD_CLUSTER_KEY",
@@ -107,13 +120,19 @@ TIMEOUT_KEY: Final[str] = "MOLT_BACKUP_TIMEOUT_SECONDS"
 SELF_MANAGED_BACKUP_STATEMENT: Final[str] = "BACKUP INTO %s"
 
 # The one write this module performs. Every column of the row is a bound
-# parameter.
+# parameter, and it is sent behind the fence, so a superseded owner records no
+# backup evidence for a run it no longer holds.
 BACKUP_RECORD_STATEMENT: Final[str] = (
     "INSERT INTO backup_record "
     "(run_id, backup_id, backup_path, target_uri, taken_at, command, taken, referenced, "
     "status, detail) "
     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
+
+# What the recording transaction is called in a log record and in the note an
+# exhausted retry attaches, so a refused backup record is distinguishable from
+# every other write of the run that carries the same fence.
+BACKUP_RECORD_LABEL: Final[str] = "backup_record"
 
 # The fallback's command, in the two halves the cluster identifier sits between.
 # The control plane lists backups and configures them and creates none, which is
@@ -537,8 +556,9 @@ def take_backup(
 
     Returns:
         The record of what happened, whose `fatal` property is what the engine
-        aborts on. The returned record is not stored; `record_backup` writes it,
-        so the caller frames that write with the rest of its evidence.
+        aborts on. The returned record is not stored; `record_backup` writes it
+        behind the fence, so the caller frames that write with the rest of its
+        evidence and under the same ownership.
     """
     if skip:
         log(
@@ -563,17 +583,50 @@ def take_backup(
 # ---------------------------------------------------------------------------
 
 
-def record_backup(store: MemoryStore, record: BackupRecord) -> BackupRecord:
-    """Write one backup record and return it unchanged.
+def record_backup(
+    store: MemoryStore,
+    record: BackupRecord,
+    *,
+    client_id: UUID,
+    generation: int,
+) -> BackupRecord:
+    """Write one backup record behind the fence and return it unchanged.
 
     The write is its own short transaction, outside the statement and the
-    subprocess above, so no transaction is held open across either.
+    subprocess above, so no transaction is held open across either. It is a fenced
+    transaction rather than a plain serializable one: the row is evidence about the
+    run rather than memory content, and a certificate reads its backup evidence out
+    of this table, so a worker whose lease was taken over must not be able to leave
+    a row here for a later reader to cite. The generation read runs on this write's
+    own cursor ahead of the insert, and a superseded owner writes nothing.
+
+    Both the tenant and the generation are demanded rather than defaulted, because
+    every caller of this reaches it after ownership was taken and before the first
+    mutation, so there is no caller that legitimately holds neither.
+
+    Args:
+        store: The connection surface the transaction is framed by.
+        record: The evidence to write, already checked for internal agreement.
+        client_id: The tenant whose current lease the write is checked against.
+        generation: The generation the recording worker believes it holds.
+
+    Returns:
+        The same record, unchanged, once its transaction has committed.
+
+    Raises:
+        LeaseNotHeldError: The Client holds no current lease, so this row belongs
+            to no owner. Nothing was written.
+        StaleFencingGenerationError: This owner was superseded, so the row is
+            refused and nothing was written. The backup itself may already have
+            been issued: the statement and the control-plane command run outside
+            every transaction and neither can be taken back, so what the fence
+            withholds is the evidence, which is what a later reader would cite.
     """
 
     def body(cursor: Cursor) -> None:
         cursor.execute(BACKUP_RECORD_STATEMENT, record.parameters())
 
-    store.in_serializable(body, label="backup_record")
+    fenced(store, client_id, generation, body, label=BACKUP_RECORD_LABEL)
     return record
 
 

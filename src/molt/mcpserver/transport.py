@@ -246,7 +246,7 @@ class HttpTransport:
     nothing here blocks a process that only wanted the address.
     """
 
-    __slots__ = ("_http", "_server", "_serving", "_thread")
+    __slots__ = ("_answered", "_counted", "_http", "_server", "_serving", "_thread")
 
     def __init__(
         self,
@@ -258,7 +258,13 @@ class HttpTransport:
         self._server = server
         bind_host = server.settings.bind_host if host is None else host
         bind_port = server.settings.bind_port if port is None else port
-        self._http = ThreadingHTTPServer((bind_host, bind_port), _make_handler(server))
+        # Requests are answered on threads of their own, so the count is taken under a
+        # lock rather than left to the atomicity of an addition.
+        self._answered = 0
+        self._counted = threading.Lock()
+        self._http = ThreadingHTTPServer(
+            (bind_host, bind_port), _make_handler(server, self._count_one)
+        )
         self._http.timeout = POLL_SECONDS
         self._serving = threading.Event()
         self._thread: threading.Thread | None = None
@@ -277,13 +283,31 @@ class HttpTransport:
         bound = self._http.server_address
         return str(bound[0]), int(bound[1])
 
+    def _count_one(self) -> None:
+        """Record one request that was answered, from the thread that answered it."""
+        with self._counted:
+            self._answered += 1
+
+    @property
+    def answered(self) -> int:
+        """How many requests this transport has answered."""
+        with self._counted:
+            return self._answered
+
     def serve_bounded(self, requests: int) -> None:
-        """Serve at most this many requests, returning when they are served or stopped."""
+        """Serve this many requests, returning when they are answered or stopped.
+
+        The bound counts answers, not iterations. The socket is polled with a timeout
+        so that a stop is noticed without a signal, and an expired poll is *not* a
+        served request: counting one would end an idle loop for the reason it was idle.
+        A bound of ten thousand answered ten thousand times fewer than one poll interval
+        apart is what the hosted verb asks for, and counting polls would have ended it
+        after ten thousand polls — a little over half an hour of quiet — while reporting
+        the full count as though it had been busy.
+        """
         self._serving.set()
-        served = 0
-        while served < requests and self._serving.is_set():
+        while self.answered < requests and self._serving.is_set():
             self._http.handle_request()
-            served += 1
 
     def start(self, requests: int) -> None:
         """Run the bounded loop on a thread of its own."""
@@ -301,8 +325,15 @@ class HttpTransport:
         self._http.server_close()
 
 
-def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
-    """The request handler class bound to one server instance."""
+def _make_handler(server: McpServer, answered: Callable[[], None]) -> type[BaseHTTPRequestHandler]:
+    """The request handler class bound to one server instance.
+
+    The callback is how the bounded loop learns that a request was answered rather
+    than that a poll expired. It is required rather than defaulted, because a handler
+    built without it would count nothing and the loop over it would never end.
+    It is called once per answer, after the body is written, from the thread that
+    wrote it.
+    """
 
     class Handler(BaseHTTPRequestHandler):
         """One request, routed through the same function a direct caller uses."""
@@ -340,5 +371,6 @@ def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
             self.send_header(_CONTENT_LENGTH_HEADER, str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            answered()
 
     return Handler

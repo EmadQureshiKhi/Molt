@@ -227,6 +227,84 @@ IngressVerifier = Callable[[Mapping[str, str], bytes], None]
 ApprovalReader = Callable[[UUID, UUID], tuple[JsonObject, ...]]
 RecallSearch = Callable[[RecallQuery], RecallAnswer]
 
+# The two modules the recall seam is built from, resolved by name at the point of use
+# rather than imported here. The engine imports the store and the provider registry
+# imports the configuration surface, and neither belongs in this module's import graph:
+# the seam exists so the Collector depends on a shape, and building the default
+# implementation must not turn that shape back into a hard dependency. Resolving by name
+# also keeps a container that never serves a recall from paying either import.
+_RECALL_MODULE: Final[str] = "molt.recall"
+_PROVIDER_REGISTRY_MODULE: Final[str] = "molt.providers.registry"
+_PROVIDER_MODULE: Final[str] = "molt.providers"
+
+# The setting naming which embedding implementation a recall query is vectorised by. The
+# same one the ingest path embeds with, so a query and the corpus it searches are
+# measured by the same model.
+_EMBEDDING_PROVIDER_ENV: Final[str] = "MOLT_EMBEDDING_PROVIDER"
+
+
+def _recall_of(configuration: Configuration, store: MemoryStore) -> RecallSearch | None:
+    """The recall implementation this container serves, or None when it cannot build one.
+
+    The seam had no default, and nothing supplied one. A deployed Collector therefore
+    answered every recall with an empty result set and a warning saying an engine was
+    not attached — on the agent's critical path, for the feature the rest of the system
+    exists to serve, while the engine itself was built, tested, and reachable from every
+    other surface. The route worked, the corpus was searchable, and the two were never
+    joined.
+
+    None is still returned rather than raised when the engine cannot be built, because
+    that is what the route already handles and what it should: a container whose provider
+    credential is unreadable must still accept ingest, and a recall that answers nothing
+    costs the agent one request where a failed cold start would cost it every request.
+    The reason is logged once, at build time, so an empty answer is explained somewhere
+    other than at the caller.
+
+    The tenancy filter is not applied here and is not this function's to apply. The
+    engine resolves the asking Session's Client from the stored row and permits that
+    Client, so a query cannot widen its own reach by naming a Session it does not own.
+    """
+    try:
+        recall_module = importlib.import_module(_RECALL_MODULE)
+        registry = importlib.import_module(_PROVIDER_REGISTRY_MODULE)
+        providers = importlib.import_module(_PROVIDER_MODULE)
+        provider = registry.load_embedding_builder(configuration.text(_EMBEDDING_PROVIDER_ENV))(
+            configuration
+        )
+        # The engine's query surface is one call and every provider names another, so the
+        # provider is adapted rather than passed. Without the adapter the engine attaches
+        # and the call fails on a missing attribute, which is what a deployed recall did.
+        embedder = providers.ProviderEmbedder(provider)
+        engine = recall_module.RecallEngine.from_configuration(store, embedder, configuration)
+    # A container that cannot build the engine still serves ingest, so every cause of a
+    # failed build is one outcome here: the route's documented empty answer.
+    except Exception as error:
+        log(
+            Severity.WARNING,
+            COMPONENT,
+            "no recall engine could be built, so recall answers an empty result set",
+            cause=type(error).__name__,
+        )
+        return None
+
+    def search(query: RecallQuery) -> RecallAnswer:
+        found = engine.recall(
+            query.query_text,
+            query.limit,
+            session_id=query.session_id,
+        )
+        return RecallAnswer(results=tuple(item.as_document() for item in found))
+
+    log(
+        Severity.INFO,
+        COMPONENT,
+        "attached the recall engine",
+        embedding_provider=provider.name,
+        model_id=provider.model_id,
+        recall_floor=engine.recall_floor,
+    )
+    return search
+
 
 @dataclass(frozen=True, slots=True)
 class Invocation:
@@ -356,6 +434,7 @@ class Collector:
         built = MemoryStore.from_configuration(resolved, reader=reader) if store is None else store
         bearer = resolve_collector_bearer(resolved, reader=reader)
         ingress_key = resolve_ingress_signing_key(resolved, reader=reader)
+        search = _recall_of(resolved, built) if recall is None else recall
         log(
             Severity.INFO,
             COMPONENT,
@@ -373,7 +452,7 @@ class Collector:
             ingress_key=ingress_key,
             ingress=ingress,
             approvals=approvals,
-            recall=recall,
+            recall=search,
         )
 
     # -- properties ------------------------------------------------------

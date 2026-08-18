@@ -66,11 +66,14 @@ def run(context: VerbContext) -> ExitCode:
             hosted = HttpTransport(server)
             try:
                 # A bounded loop rather than an endless one, so the verb ends on
-                # its own rather than needing a signal to be shut down.
+                # its own rather than needing a signal to be shut down. The bound
+                # counts answers, so an idle server is not one that has run out.
                 hosted.serve_bounded(_HOSTED_REQUEST_BOUND)
             finally:
                 hosted.stop()
-            answered = _HOSTED_REQUEST_BOUND
+            # What it answered rather than what it was asked for: a loop stopped
+            # early would otherwise report a count it never reached.
+            answered = hosted.answered
         else:
             raise UsageError("--transport names either stdio or http")
     document["requests_answered"] = answered
