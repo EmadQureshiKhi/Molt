@@ -23,6 +23,7 @@
 
 <p align="center">
   <a href="#live-demo">Live demo</a> &nbsp;·&nbsp;
+  <a href="#or-run-the-whole-thing-yourself-in-about-a-minute">Run it yourself</a> &nbsp;·&nbsp;
   <a href="#architecture">Architecture</a> &nbsp;·&nbsp;
   <a href="#the-erasure-path">Erasure path</a> &nbsp;·&nbsp;
   <a href="#semantic-residue-and-the-threshold-decision">Residue</a> &nbsp;·&nbsp;
@@ -139,11 +140,74 @@ it: the cluster exists, the image carries the erasure verb, and the task role wo
 same console role — which is why nothing about who may sign changes when it is added.
 </details>
 
-**If you would rather drive it from a terminal**, [`docs/demo.md`](docs/demo.md) is the
-recorded walkthrough, including the paths that need a credential. The ingest and recall
-routes require the bearer value the deployment holds in its parameter store, and ingest
-requires a request signature as well, so neither is published — the console is the
-demonstration.
+The ingest and recall routes require the bearer value the deployment holds in its parameter
+store, and ingest requires a request signature as well, so neither is published — the
+console is the demonstration.
+
+---
+
+### Or run the whole thing yourself, in about a minute
+
+You do not need our deployment, a cloud account, a cluster, or a single API key. The entire
+flow runs from a checkout against a local single-node database, with the model providers and
+the key service supplied as stubs, so the logic is exercised without a credential existing
+anywhere.
+
+```text
+python3.12 -m pip install -r requirements.txt
+
+scripts/run_local_db.sh start                      # prints a connection string
+export MOLT_TEST_DSN="<the connection string it printed>"
+
+python3.12 -m pytest tests/e2e/test_full_flow.py -v
+```
+
+**Eleven assertions, about 25 seconds, one continuous history.** Not eleven isolated tests —
+one flow, each assertion checking the next thing that happened to it:
+
+| # | What it asserts |
+|---|---|
+| 1 | The seeded corpus and its planted cross-tenant contamination are in the cluster |
+| 2 | A real signed ingest request carried its batch through the request path, and the rows landed — the status is checked alongside the rows, because a status alone is satisfied by a request that accepted and persisted nothing |
+| 3 | A recall page is decided by a procedure's **standing** where cosine distance cannot decide |
+| 4 | Every threshold-grid pair is answered, or reported inapplicable with its reason |
+| 5 | A leased erasure run completed and admits a certificate |
+| 6 | **The issued certificate verifies against the erased cluster** |
+| 7 | The counts are confirmed through the derived mechanism, so agreement does not depend on the collection horizon |
+| 8 | The certificate's ownership block agrees with the lease the run actually held |
+| 9 | The named checkpoint is the stored one immediately preceding the run |
+| 10 | The first-attribution pair is what the cluster held *before* the run |
+| 11 | The working-row count is that tenant's own and no one else's |
+
+Assertion 6 is the whole thesis in one line: erase a tenant, then have an independent
+verifier confirm it against the live database.
+
+**The credential-free suites — no database either:**
+
+```text
+python3.12 -m pytest tests/unit tests/property tests/quality tests/spec \
+  -m "not integration and not services and not concurrency and not e2e and not perf"
+```
+
+**2,482 tests in about 25 seconds** on a bare checkout. Among them the 40 correctness
+properties under Hypothesis — erasure completeness, erasure preservation, redaction
+idempotence, chain tamper-evidence, fencing safety, recall tenancy — each generating
+hundreds of cases rather than checking one example.
+
+**Everything, including the database-backed suites:**
+
+```text
+MOLT_TEST_DSN="<connection string>" bash scripts/run_tests.sh --instance --workers 4
+```
+
+Unit and property, then the static gates, then the instance-backed suites, then the
+contention cases that each measure the conflict they create. Roughly fifteen minutes.
+
+**Driving it by hand instead.** Every operator workflow is a `molt` verb, listed under
+[operator commands](#operator-commands). Two notes for a local run: `molt seed` and a live
+`molt erase` reach a real embedding and text provider, so those two need provider
+credentials, and signing a certificate needs a key service. The e2e flow above stubs all
+three, which is exactly why it needs none of them.
 
 ---
 
@@ -171,6 +235,7 @@ not trust the people running it.
 ## Contents
 
 - [Live demo](#live-demo)
+- [Run the whole thing yourself](#or-run-the-whole-thing-yourself-in-about-a-minute)
 - [One system of record](#one-system-of-record)
 - [Why this exists](#why-this-exists)
 - [Architecture](#architecture)
@@ -588,8 +653,7 @@ caching.
 ## Demonstration
 
 The deployment is live. The address, the operator credential, and a step-by-step walkthrough
-are in [live demo](#live-demo) at the top of this file; the shot list and the exact command
-behind each beat are in [`docs/demo.md`](docs/demo.md), and the monthly cost of the
+are in [live demo](#live-demo) at the top of this file, and the monthly cost of the
 configuration is in [`docs/cost.md`](docs/cost.md).
 
 | Item | Where |

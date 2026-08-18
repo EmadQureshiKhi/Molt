@@ -1081,7 +1081,7 @@ These govern every task below and are not repeated per task.
 
   - [x] 33.9 Write the cost record, reviews record, traceability table, and recording script
     - Write `docs/cost.md` stating a maximum monthly cost for the delivered configuration, with a table naming each service, its estimated monthly consumption, and its estimated monthly cost, plus the measured storage footprint, the measured request-unit consumption, the measured prompt-cache hit ratio and the resulting cost per Erasure_Run, and the note that cluster consumption is covered by introductory credits rather than a perpetual free tier and that Fargate, per-secret secret storage, and asymmetric key storage carry no perpetual free tier
-    - Write `docs/reviews.md` recording the schema and query reviews conducted with the Agent Skills material and the changes those reviews produced, `docs/traceability.md` mapping each judging criterion to the requirements that address it, and `docs/demo.md` as a recording script of at most three minutes covering capture on two machines, semantic recall changing an agent decision, residue detection, an Erasure_Run, and certificate verification
+    - Write `docs/reviews.md` recording the schema and query reviews conducted with the Agent Skills material and the changes those reviews produced, and `docs/traceability.md` mapping each judging criterion to the requirements that address it
     - _Requirements: 27.10, 33.5, 33.6, 33.9, 35.9, 35.10, 38.6_
 
   - [x]* 33.10 Run the hygiene and glossary coverage checks across the completed tree

@@ -4080,7 +4080,6 @@ molt/
                                 # and the deployment region
     mcp.md                      # Molt_MCP_Server tools, transports, and read-only posture
     skills.md                   # the shipped Agent_Skills and how a client loads them
-    demo.md                     # the recording script
     cost.md                     # maximum monthly cost, per-service consumption and cost,
                                 # measured storage and request units, prompt-cache hit ratio
     hygiene.md                  # pattern classes, denylist and allowlist rationale

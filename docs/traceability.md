@@ -8,11 +8,15 @@ the hard requirements and the judging criteria — carried over with their requi
 references unchanged. Nothing is added to either list, and nothing is dropped from
 one because it is inconvenient.
 
-**Two criteria are not met.** No public demonstration web application is deployed,
-and no recording exists. The script a recording would follow does now exist, as
-[demo.md](demo.md), so what is missing for the second is the recording rather than
-the plan. Both are stated as not delivered below rather than described in terms of
-the code that would serve them.
+**One criterion is not met.** No recording exists. Every beat one would show is reachable
+against the live deployment, so what is missing is the take rather than the capability, and
+it is stated as not delivered below rather than described in terms of the code that would
+serve it.
+
+The public demonstration web application is met: the console is deployed at its own
+domain, signs an operator in with the credential the README publishes, renders every page
+from the live cluster, and serves a signed erasure certificate that verifies against that
+cluster.
 
 Two things bound how the rest should be read. Where the README's status section and
 this one disagree, the paths in these tables are the check, because a path can be
@@ -56,7 +60,7 @@ not reach that particular claim rather than that no deployment exists.
 | At least one AWS service | 34, 30, 33 | `infra/templates/kms.yaml`, `storage.yaml`, `parameters.yaml`, `observability.yaml`, `gateway.yaml` | Met and exercised live: the parameter store holds every credential the deployment reads, the asymmetric key and the Object Lock bucket back the certificate path, functions serve both surfaces, two task services run, and the regional endpoints carry public traffic |
 | Public repo with README, dependencies, example config, seed data, setup instructions, MIT licence | 35, 28, 30.10, 50.8, 51 | `README.md`, `pyproject.toml`, `config.example.toml`, `src/molt/seed/`, [setup.md](setup.md), `LICENSE` | Met |
 | Functional public demo web app | 25, 34.2, 34.9, 48.10, 49.16, 51.4 | `src/molt/console/`, `web/templates/`, `infra/templates/console.yaml`, `gateway.yaml` | Met — the console is deployed at its own domain, signs an operator in, and renders every page from the live cluster over a seeded corpus. An erasure can be started from it, and the certificate a completed run produced is served and verified through it |
-| Video under three minutes showing the memory layer | 35.9 | none | **Not met** — no recording, and no script for one |
+| Video under three minutes showing the memory layer | 35.9 | none | **Not met** — every beat is reachable against the live deployment; no recording exists |
 | Documentation of CockroachDB tools and AWS services used | 34.7, 34.8, 34.12, 37.13, 37.14, 42.14, 51.5 | [architecture.md](architecture.md), [platform.md](platform.md), [mcp.md](mcp.md), [skills.md](skills.md), [providers.md](providers.md), [cost.md](cost.md), `infra/README.md` | Met; the cost record labels each figure measured, derived, or estimated, and records request-unit consumption as outstanding |
 | Architecture diagram | 35.5 | `assets/molt-architecture.svg`, rendered in [architecture.md](architecture.md) and in the README | Met |
 
@@ -199,14 +203,12 @@ and the configured signing key live certificate verification needs.
 
 Requirement 35.9. **Not met.**
 
-No recording exists. What is delivered is the script rather than the recording: the
-demonstration script Requirement 35.9 obliges the documentation to carry — capture on
-two machines, semantic recall changing an agent decision, residue detection, an
-erasure run, and certificate verification — is [demo.md](demo.md), with its shot
-list, its timings, and the command behind each beat. The sequence it follows is the
-sequence `tests/e2e/test_full_flow.py` executes, so the order was taken from a run
-rather than invented. The criterion stays not met because a script is not a
-recording, and because the deployment the script is written against does not exist.
+No recording exists. Every beat such a recording would show is reachable — capture on two
+machines, semantic recall changing an agent decision, residue detection, an erasure run, and
+certificate verification — and the sequence is the one `tests/e2e/test_full_flow.py`
+executes, so the order comes from a run rather than from a plan. The console serves each of
+them against the live cluster. The criterion stays not met because a reachable path is not a
+recording.
 
 ## Documentation of CockroachDB tools and AWS services used
 

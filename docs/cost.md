@@ -268,8 +268,6 @@ encoded length against the configured floor; `MOLT_MINIMUM_CACHEABLE_PREFIX_BYTE
 - [architecture.md](architecture.md) — the topology decisions that removed the load
   balancer, the address translation, and the interface endpoints.
 - [setup.md](setup.md) — the deployment order for every stack named in the table.
-- [demo.md](demo.md) — the recording made against the configuration this document
-  prices.
 - [glossary.md](glossary.md) — `Stable_Prefix`, `Cache_Boundary`,
   `Minimum_Cacheable_Prefix_Length`, `Erasure_Run`, `Fargate`, `KMS`,
   `Parameter_Store`, `CloudWatch`.
