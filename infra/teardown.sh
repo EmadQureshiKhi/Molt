@@ -23,8 +23,21 @@ set -o nounset
 set -o pipefail
 
 readonly INFRA_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT="$(cd -- "${INFRA_DIR}/.." && pwd)"
 readonly AWS_BIN="${MOLT_AWS_BIN:-aws}"
-readonly PYTHON="python3.12"
+
+# The interpreter the repository's own helpers run under, resolved in the deployment
+# script's order so a teardown and the deployment it reverses agree on which
+# interpreter they mean rather than differing by which one was invoked.
+if [[ -n "${MOLT_PYTHON:-}" ]]; then
+  readonly PYTHON="${MOLT_PYTHON}"
+elif [[ -x "${HOME}/.molt-venv/bin/python" ]]; then
+  readonly PYTHON="${HOME}/.molt-venv/bin/python"
+elif [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
+  readonly PYTHON="${REPO_ROOT}/.venv/bin/python"
+else
+  readonly PYTHON="python3.12"
+fi
 
 # The reverse of the deployment order.
 readonly TEARDOWN_ORDER=(
@@ -32,6 +45,7 @@ readonly TEARDOWN_ORDER=(
   mcp
   watcher
   cdn
+  gateway
   console
   collector
   storage

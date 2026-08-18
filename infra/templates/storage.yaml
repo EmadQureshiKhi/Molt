@@ -1,9 +1,17 @@
 Description: >-
-  The bucket erasure certificates are written to. Object Lock is enabled at
-  creation because it can be enabled on no existing bucket, and the retention is
-  GOVERNANCE mode with a short interval so that teardown can release it and
-  complete without manual intervention. Nothing but certificates is written here:
-  no memory content, no vector, and no credential.
+  The bucket erasure certificates are written to, and the identity policies that
+  grant the two roles reaching it their side of the bucket policy. Object Lock is
+  enabled at creation because it can be enabled on no existing bucket, and the
+  retention is GOVERNANCE mode with a short interval so that teardown can release it
+  and complete without manual intervention. Nothing but certificates is written
+  here: no memory content, no vector, and no credential.
+
+  Why the grants are here rather than with the roles. The bucket policy names three
+  role resource names, and the platform validates that a named principal exists when
+  the bucket policy is created, so the roles stack creates all three roles ahead
+  of this one. The roles' own certificate permissions name this bucket, which
+  does not exist until this stack creates it, so they are attached here to the roles
+  by name. The ingest role gets none, because it reads nothing here.
 
 Parameters:
   DeploymentName:
@@ -25,27 +33,68 @@ Parameters:
     MinValue: 1
   CollectorExecutionRoleName:
     Type: String
-    Description: Name of the ingest execution role, which reads nothing here.
+    Description: >-
+      Name of the ingest execution role, which reads nothing here. Named by the
+      bucket policy only, so that the set of principals the bucket admits is stated
+      rather than left to the account's other policies. The roles stack creates it.
     Default: molt-collector-exec
   ConsoleExecutionRoleName:
     Type: String
-    Description: Name of the console execution role, which writes certificates.
+    Description: >-
+      Name of the console execution role, which writes certificates. The roles stack
+      creates it, so the bucket policy names an existing principal and the write
+      grant below attaches to an existing role.
     Default: molt-console-exec
   VerifierRoleName:
     Type: String
-    Description: Name of the verifier role, which reads certificates.
+    Description: >-
+      Name of the verifier role, which reads certificates. The roles stack creates
+      it, like the two above.
     Default: molt-verifier
   PolicyLanguageVersion:
     Type: String
     Description: Edition of the access-policy language every policy document declares.
     AllowedPattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+  BucketNameSuffix:
+    Type: String
+    Default: ""
+    AllowedPattern: "^(|-[a-z0-9][a-z0-9-]{0,20})$"
+    Description: >-
+      Appended to the constructed bucket name, empty for the name the deployment name and
+      the account already determine.
+
+      It exists because a bucket's own policy can lock every principal out of changing it,
+      including the principal deploying this stack, and an explicit denial in a resource
+      policy is not overridable by any identity policy. When that happens the bucket
+      cannot be repaired, emptied, or deleted, and the only way forward is a new one — so
+      the name has to be variable without renaming the whole deployment. Object Lock is
+      the other half of the reason: it cannot be enabled on an existing bucket, so a
+      bucket is never reconfigured into the shape this stack wants.
+
+      Changing it creates a new bucket and retains the old one, which the retain policies
+      on the bucket make possible: a replacement that tried to delete an unreachable
+      bucket would be refused, and the stack would be stuck a second time.
 
 Resources:
   CertificateBucket:
     Type: AWS::S3::Bucket
+    # Evidence outlives the stack that declared it. A certificate is tamper evidence held
+    # under Object Lock precisely so that nobody can remove it, and a stack deletion or a
+    # replacement that swept the bucket away would be this deployment removing the
+    # evidence it exists to preserve. Both policies say retain, so the resource is
+    # released from the stack rather than destroyed with it.
+    #
+    # It is also what makes a bucket recoverable when its own policy has locked everyone
+    # out. That is not hypothetical: the policy below was once written with a
+    # not-principal element, which denied the deploying principal the ability to replace
+    # it, and an explicit denial in a resource policy cannot be overridden by any identity
+    # policy. The only route back was to supersede the bucket, and a replacement that
+    # tried to delete the unreachable one would have been refused too.
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
     Properties:
       BucketName:
-        Fn::Sub: "${DeploymentName}-certificates-${AWS::AccountId}-${AWS::Region}"
+        Fn::Sub: "${DeploymentName}-certificates-${AWS::AccountId}-${AWS::Region}${BucketNameSuffix}"
       # Object Lock is declared at creation because it cannot be enabled on an
       # existing bucket. Versioning is its prerequisite and is declared with it.
       ObjectLockEnabled: true
@@ -117,15 +166,58 @@ Resources:
           # Every principal outside the three named roles is denied outright, so
           # the bucket's reachable set is the set the design names and not the set
           # the account's other policies happen to allow.
+          # The exception is a condition on the requesting principal rather than a
+          # not-principal element, for the reason the signing key's own denial states: a
+          # not-principal element is matched against the principal that made the request,
+          # and a function requests as a session assumed from its role rather than as the
+          # role, so an exception naming the role matches nothing a function ever sends
+          # and the denial applies to every role it means to except. The key's denial
+          # shipped that way and failed exactly so; this one is written the way that works
+          # before it has the chance to.
+          #
+          # The condition key resolves to the role for a session assumed from it, so each
+          # pattern matches whether the caller is the role or a session of it. The account
+          # root is kept in the set because it is the principal an operator's own
+          # credential resolves to.
+          # What this denies is reaching the evidence: reading an object, writing one,
+          # deleting one, and listing the bucket. It deliberately does not deny the
+          # bucket's own administration, and that boundary is the whole point of the
+          # statement rather than a gap in it.
+          #
+          # A policy that denies its own replacement is unrecoverable. An explicit denial
+          # in a resource policy cannot be overridden by any identity policy, so a denial
+          # of every operation to every principal outside a set of roles also denies the
+          # principal that deploys this stack the ability to correct the statement — and
+          # then the bucket cannot be repaired, emptied, or deleted by anything except the
+          # account's own root credential. That is not a risk being weighed here; it
+          # happened, on this bucket's predecessor, and the way out was to supersede the
+          # bucket rather than to fix it.
+          #
+          # Nothing is given up by drawing the line here. Denying administration protects
+          # no object: a principal permitted to rewrite this policy could rewrite it to
+          # permit itself either way, so the denial never stood between such a principal
+          # and the evidence. What actually protects a certificate once written is Object
+          # Lock in compliance mode, which refuses an overwrite and a deletion for the
+          # retention period to every principal including the account root — and that is
+          # declared on the bucket above, where no policy edit can reach it.
           - Sid: DenyEveryPrincipalOutsideTheNamedRoles
             Effect: Deny
-            NotPrincipal:
-              AWS:
-                - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${ConsoleExecutionRoleName}"
-                - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${VerifierRoleName}"
-                - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${CollectorExecutionRoleName}"
-                - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
-            Action: s3:*
+            Principal: "*"
+            Condition:
+              StringNotLike:
+                aws:PrincipalArn:
+                  - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${ConsoleExecutionRoleName}"
+                  - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${VerifierRoleName}"
+                  - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${CollectorExecutionRoleName}"
+                  - Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
             Resource:
               - Fn::GetAtt:
                   - CertificateBucket
@@ -136,6 +228,70 @@ Resources:
                       Fn::GetAtt:
                         - CertificateBucket
                         - Arn
+
+  # The console role's side of the bucket policy: the certificate prefix and no
+  # other part of the bucket. The prefix is the same one the process is configured
+  # with, because a process writing outside its grant is refused by the policy
+  # above rather than silently allowed.
+  ConsoleExecutionRoleCertificatePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: console-certificates
+      Roles:
+        - Ref: ConsoleExecutionRoleName
+      PolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Sid: WriteAndReadCertificatesUnderTheirPrefixOnly
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              # Applying a retention period on the put is a second action, and without
+              # it a write carrying Object Lock headers is refused while the same write
+              # without them succeeds. That is the wrong way round for evidence: the
+              # locked write is the one that must work, so the action that locks it is
+              # granted here. It confers no power to shorten or lift a retention, which
+              # the bucket's own compliance-mode configuration refuses to every
+              # principal including the account root.
+              - s3:PutObjectRetention
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource:
+              Fn::Sub:
+                - "${BucketArn}/${Prefix}*"
+                - BucketArn:
+                    Fn::GetAtt:
+                      - CertificateBucket
+                      - Arn
+                  Prefix:
+                    Ref: CertificatePrefix
+
+  # The verifier's side, which is the read and nothing else. An auditor checks a
+  # certificate; a certificate an auditor could rewrite would be worth nothing.
+  VerifierRoleCertificatePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: verifier-certificates
+      Roles:
+        - Ref: VerifierRoleName
+      PolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Sid: ReadCertificatesUnderTheirPrefixOnly
+            Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource:
+              Fn::Sub:
+                - "${BucketArn}/${Prefix}*"
+                - BucketArn:
+                    Fn::GetAtt:
+                      - CertificateBucket
+                      - Arn
+                  Prefix:
+                    Ref: CertificatePrefix
 
 Outputs:
   CertificateBucketName:

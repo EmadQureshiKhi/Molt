@@ -22,6 +22,33 @@ Parameters:
   ImageUri:
     Type: String
     Description: Container image the task runs.
+  ImageRepositoryName:
+    Type: String
+    Default: molt
+    AllowedPattern: "^[a-z0-9][a-z0-9._/-]{1,255}$"
+    Description: >-
+      Repository the image is read from, which the execution role's read grant is
+      scoped to. Taken as a name rather than parsed out of the image reference, for the
+      reason the watcher stack states.
+  Transport:
+    Type: String
+    Default: stdio
+    AllowedValues:
+      - stdio
+      - http
+    Description: >-
+      How a caller reaches the tool server. The process transport reads a peer on its
+      own standard input, so it belongs to a server an agent spawns rather than to one
+      a service keeps running: a task carrying it has no peer, serves its tools, and
+      exits, and the service restarts it forever.
+
+      That is why the delivered desired count is zero rather than one. The deployed
+      artefact of this stack is the task definition and its two roles, which is what an
+      agent's own runner or a one-off task uses; the running copy of the tool server is
+      the one the agent starts beside itself. Raising the count is only meaningful
+      alongside the network transport, and that transport authenticates no caller, so
+      the task security group admits no inbound traffic and nothing could reach it in
+      this deployment anyway.
   ClusterName:
     Type: String
     Description: Name of the task cluster from the watcher stack.
@@ -37,6 +64,15 @@ Parameters:
   TaskMemory:
     Type: String
     Default: "512"
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    Description: >-
+      Tasks the service runs. A creation waits for the service to reach steady
+      state, and a task cannot reach it before the image it names exists, so a
+      first deployment may bring the service up at zero and raise this once the
+      image is in the registry rather than waiting out a rollback.
   LogRetentionDays:
     Type: Number
     Default: 7
@@ -44,6 +80,15 @@ Parameters:
     Type: Number
     Default: 50
     Description: Upper bound on rows any single tool call returns.
+  EmbeddingModelId:
+    Type: String
+    Description: >-
+      Identifier of the embedding model the selected provider calls. The recall tool
+      embeds the query text it is given, so this server reaches an embedding provider
+      exactly as the ingest function does. No default is declared and none is
+      invented here: the repository grounds no verified model identifier, only the
+      width the schema fixes, so this is an operator input the parameter file
+      supplies.
   PermittedClients:
     Type: String
     Description: >-
@@ -81,13 +126,26 @@ Resources:
             Version:
               Ref: PolicyLanguageVersion
             Statement:
-              - Sid: PullTheImageAndWriteItsOwnLogStreams
+              # Three statements where there was one, for the reason the watcher's
+              # are: one resource cannot be right for two services, and giving the
+              # registry operations a log group as their resource left no task able to
+              # pull its image.
+              - Sid: AskTheRegistryForATokenWhichAcceptsNoResource
                 Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: ReadTheImageFromItsOwnRepositoryOnly
+                Effect: Allow
+                Action:
                   - ecr:BatchCheckLayerAvailability
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchGetImage
+                Resource:
+                  Fn::Sub: "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImageRepositoryName}"
+              - Sid: WriteItsOwnLogStreamsOnly
+                Effect: Allow
+                Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource:
@@ -174,11 +232,25 @@ Resources:
             - molt
             - mcp
           Environment:
-            - Name: MOLT_STORE_DSN_PARAM
+            - Name: MOLT_DSN_PARAM
               Value:
                 Fn::Sub: "${ParameterPrefix}/store/dsn/reader"
-            - Name: MOLT_STORE_ROLE
+            - Name: MOLT_DB_ROLE
               Value: reader
+            # The selection this credential belongs to, stated rather than
+            # defaulted. The surface defaults the embedding role to the documented
+            # default provider, and this deployment must not take that default: the
+            # delivered account holds zero on-demand inference quota that cannot be
+            # raised, so that provider's inference service refuses every call, and
+            # the credential named below belongs to the external service instead.
+            # Leaving the default in place hands this task one provider's credential
+            # while resolving the other, and the recall tool embeds every query it is
+            # asked, so the first tool call would be the first failure.
+            - Name: MOLT_EMBEDDING_PROVIDER
+              Value: external
+            - Name: MOLT_EMBEDDING_MODEL_ID
+              Value:
+                Ref: EmbeddingModelId
             - Name: MOLT_EMBEDDING_CREDENTIAL_PARAM
               Value:
                 Fn::Sub: "${ParameterPrefix}/providers/embedding-credential"
@@ -188,6 +260,16 @@ Resources:
             - Name: MOLT_MCP_PERMITTED_CLIENTS
               Value:
                 Ref: PermittedClients
+            # Stated rather than left to the surface default. Omitting it was the
+            # defect: the process resolved the process transport, which reads a peer on
+            # its own standard input, so a task with no peer served its tools, found
+            # nothing to serve them to, and exited — and the service restarted it, once
+            # a minute, indefinitely. The deployment has to choose this, because which
+            # transport is right is a property of how the server is reached and not of
+            # the server.
+            - Name: MOLT_MCP_TRANSPORT
+              Value:
+                Ref: Transport
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -205,7 +287,8 @@ Resources:
       Cluster:
         Ref: ClusterName
       LaunchType: FARGATE
-      DesiredCount: 1
+      DesiredCount:
+        Ref: DesiredCount
       TaskDefinition:
         Ref: McpTaskDefinition
       # No load balancer is attached, so no target group and no listener exist to

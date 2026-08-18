@@ -1,6 +1,6 @@
 # Infrastructure definitions
 
-Ten stacks, deployed in one order, described by templates that render the same
+Twelve stacks, deployed in one order, described by templates that render the same
 resources on every run. That repeatability is what makes `deploy.sh` idempotent and
 what lets a template change be applied by re-running it (Requirements 34.6, 27.9).
 
@@ -17,7 +17,8 @@ without touching an account with `./deploy.sh --dry-run`.
 | `storage` | The certificate bucket with object lock enabled at creation in governance mode with a short retention, versioning, blocked public access, required encryption, and a policy denying unencrypted writes and every principal outside the named roles. | 21.13, 30.11, 34.4 |
 | `collector` | The ingest function, its HTTPS function endpoint, its declared reserved concurrency, its execution role, and its log group. | 5.12, 34.1 |
 | `console` | The console function, its HTTPS function endpoint, its execution role, its log group, and the scheduled rule that invokes the checkpoint signer entry point inside the same function. | 25.14, 34.2, 45.1 |
-| `cdn` | The distribution fronting the console function endpoint as its single origin, on its own default certificate and generated host name. | 34.2, 34.9 |
+| `gateway` | A regional endpoint in front of each function, each carrying every method and path through unchanged and charged per request rather than per hour. This is how the deployment is publicly reached: a function's own endpoint is refused for every anonymous request on an account the provider has not verified, however correct its resource policy. | 34.2, 34.9, 25.14 |
+| `cdn` | The distribution fronting the console as its single origin, on its own default certificate and generated host name. Its origin is the regional endpoint rather than the console function's own, because an origin that serves nobody anonymously would make the distribution serve nobody either. Creating a distribution needs a verified account, so this stack is the one part of the deployment that may be omitted. | 34.2, 34.9 |
 | `watcher` | The task cluster, and the task definition and service for the policy watcher in a public subnet with no inbound listener. | 23.12, 33.11, 34.2 |
 | `mcp` | The task definition and service for the tool server, in a public subnet with no inbound listener, under the read-only role. | 33.11, 34.2, 40.5 |
 | `observability` | Log groups, metric filters, alarms, and the parameter holding the bounded metric cardinality ceiling. | 31.5, 33.13, 33.14 |

@@ -89,6 +89,7 @@ readonly INSTANCE_SUITES=(
   tests/integration
   tests/concurrency
   tests/property
+  tests/e2e
 )
 
 # What separates the two groups. A cluster-bound test in the parallel group would run
@@ -97,6 +98,12 @@ readonly INSTANCE_SUITES=(
 # unskipped, on a checkout with no cluster at all.
 readonly CLUSTER_BOUND='instance or integration or concurrency or e2e'
 readonly NOT_CLUSTER_BOUND='not instance and not integration and not concurrency and not e2e'
+
+# The cluster-bound cases that must not share the instance, held out of the parallel pass
+# and run afterwards on their own. Each measures the contention it creates itself against
+# a bounded retry budget, so unrelated load does not make it stricter: the budget is spent
+# on the neighbours and the case reports exhaustion where its property holds.
+readonly SERIAL_ONLY='serial'
 
 run_instance=0
 workers="auto"
@@ -171,7 +178,11 @@ if [ "$run_instance" -eq 1 ]; then
   echo
   echo "== instance-backed suites (${workers} workers, one database each) =="
   "$PYTHON" -m pytest "${INSTANCE_SUITES[@]}" -q -n "$workers" --dist loadfile \
-    -m "$CLUSTER_BOUND"
+    -m "($CLUSTER_BOUND) and not $SERIAL_ONLY"
+
+  echo
+  echo "== contention cases (serial: each measures the conflict it creates itself) =="
+  "$PYTHON" -m pytest "${INSTANCE_SUITES[@]}" -q -m "($CLUSTER_BOUND) and $SERIAL_ONLY"
 fi
 
 echo

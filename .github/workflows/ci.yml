@@ -78,18 +78,30 @@ jobs:
       - name: step 5, metadata-hygiene check
         run: python3.12 scripts/hygiene.py
 
-      # Step 6 of 6, first half. The unit suite. The database-backed, service,
-      # concurrency, end-to-end, and performance suites are deselected by
-      # marker, which is what lets the run proceed with no reachable database
+      # Step 6 of 6, first of three. The unit suite. The database-backed,
+      # service, concurrency, end-to-end, and performance suites are deselected
+      # by marker, which is what lets the run proceed with no reachable database
       # instance, no cloud account, and no model provider.
       - name: step 6, unit suite
         run: >-
           python3.12 -m pytest tests/unit
           -m "not integration and not services and not concurrency and not e2e and not perf"
 
-      # Step 6 of 6, second half. The property suite, run after the unit suite
-      # so a cheap failure surfaces before the generative run, under the same
-      # marker deselection.
+      # Step 6 of 6, second of three. The quality suite, which holds the gates
+      # over the suites themselves: the strict type check and the lint and
+      # format checks read as tests, the type-ignore allowlist, the read-only
+      # console handles, and the per-example deadline convention every property
+      # module owes. It runs before the property suite because the deadline gate
+      # is the gate on that suite, so a module configured to fail on a busy
+      # machine is reported before the generative run rather than after it.
+      - name: step 6, quality suite
+        run: >-
+          python3.12 -m pytest tests/quality
+          -m "not integration and not services and not concurrency and not e2e and not perf"
+
+      # Step 6 of 6, third of three. The property suite, run last of the three
+      # so every cheaper failure surfaces before the generative run, under the
+      # same marker deselection.
       - name: step 6, property suite
         run: >-
           python3.12 -m pytest tests/property

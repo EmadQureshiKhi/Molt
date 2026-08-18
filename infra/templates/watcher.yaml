@@ -22,6 +22,15 @@ Parameters:
   ImageUri:
     Type: String
     Description: Container image the task runs.
+  ImageRepositoryName:
+    Type: String
+    Default: molt
+    AllowedPattern: "^[a-z0-9][a-z0-9._/-]{1,255}$"
+    Description: >-
+      Repository the image is read from, which the execution role's read grant is
+      scoped to. Taken as a name rather than parsed out of the image reference,
+      because a reference may name a digest, a tag, or a registry in another account,
+      and a grant derived from parsing one would be wrong in a way nothing checks.
   PublicSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
     Description: The public subnets from the network stack.
@@ -35,6 +44,15 @@ Parameters:
   TaskMemory:
     Type: String
     Default: "512"
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    Description: >-
+      Tasks the service runs. A creation waits for the service to reach steady
+      state, and a task cannot reach it before the image it names exists, so a
+      first deployment may bring the service up at zero and raise this once the
+      image is in the registry rather than waiting out a rollback.
   LogRetentionDays:
     Type: Number
     Default: 7
@@ -87,13 +105,29 @@ Resources:
             Version:
               Ref: PolicyLanguageVersion
             Statement:
-              - Sid: PullTheImageAndWriteItsOwnLogStreams
+              # Three statements where there was one, because one resource cannot be
+              # right for two services at once. The single statement named the four
+              # registry operations and the two log operations together and gave them
+              # all the log group as their resource, so the registry grant was scoped
+              # to a log group and no task could ever pull its image. The service
+              # reported it as a placement failure naming an authorisation call, which
+              # says nothing about the resource being wrong.
+              - Sid: AskTheRegistryForATokenWhichAcceptsNoResource
                 Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: ReadTheImageFromItsOwnRepositoryOnly
+                Effect: Allow
+                Action:
                   - ecr:BatchCheckLayerAvailability
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchGetImage
+                Resource:
+                  Fn::Sub: "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImageRepositoryName}"
+              - Sid: WriteItsOwnLogStreamsOnly
+                Effect: Allow
+                Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource:
@@ -179,10 +213,10 @@ Resources:
             - molt
             - watch
           Environment:
-            - Name: MOLT_STORE_DSN_PARAM
+            - Name: MOLT_DSN_PARAM
               Value:
                 Fn::Sub: "${ParameterPrefix}/store/dsn/watcher"
-            - Name: MOLT_STORE_ROLE
+            - Name: MOLT_DB_ROLE
               Value: watcher
             - Name: MOLT_WATCHER_POLL_INTERVAL_SECONDS
               Value:
@@ -204,7 +238,8 @@ Resources:
       Cluster:
         Ref: MoltCluster
       LaunchType: FARGATE
-      DesiredCount: 1
+      DesiredCount:
+        Ref: DesiredCount
       TaskDefinition:
         Ref: WatcherTaskDefinition
       # No load balancer is attached, so no target group and no listener exist to

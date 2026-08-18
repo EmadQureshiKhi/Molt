@@ -1,8 +1,18 @@
+# The reasoning is a comment rather than part of the description below, because the
+# platform caps a template description at 1024 characters and refuses the template
+# outright when it is longer. A comment carries no cap.
+#
+# The execution role is not declared here. The roles stack creates it, ahead of the key
+# and the bucket, because the key policy and the bucket policy name roles as principals
+# and the platform validates that a named principal exists when those resources are
+# created. This stack takes the role's resource name as a parameter resolved from that
+# stack's outputs and runs the function under it.
 Description: >-
-  The ingest function, its HTTPS function endpoint, its execution role, and its log
-  group. Reserved concurrency is declared, which is what bounds the cost of a
-  leaked bearer token: a flood is served by at most the declared number of
-  executions and the rest are refused.
+  The ingest function, its HTTPS function endpoint, and its log group. Reserved
+  concurrency is declared, which is what bounds the cost of a leaked bearer token: a
+  flood is served by at most the declared number of executions and the rest are
+  refused. It runs under the ingest execution role the roles stack creates rather than
+  declaring one.
 
   Authentication posture, stated plainly. The function endpoint declares no
   request signing, because the callers are capture hooks on developer machines that
@@ -32,12 +42,29 @@ Parameters:
     Default: molt.collector.handler.handler
     Description: The function entry point, which is one request in and one reply out.
   ReservedConcurrency:
-    Type: Number
-    Default: 10
-    MinValue: 1
+    Type: String
+    Default: "10"
+    AllowedPattern: "^(none|[1-9][0-9]*)$"
     Description: >-
-      Ceiling on concurrent ingest executions. This is a cost control rather than a
-      performance setting: it is what makes a leaked token bounded.
+      Ceiling on concurrent ingest executions, or the word none to state no ceiling of
+      this kind. This is a cost control rather than a performance setting: it is what
+      makes a leaked token bounded.
+
+      The word exists because a reservation is not always grantable. The platform
+      refuses one that would leave the account's unreserved pool below a floor of its
+      own, so an account whose whole concurrency allowance equals that floor — which is
+      the allowance a new account starts with — can grant no reservation at all, of any
+      size. Written as a number alone this parameter made the function impossible to
+      create there, and the reported fault was about the account's unreserved pool
+      rather than about a ceiling anyone had chosen.
+
+      What the word gives up is stated rather than hidden. A reservation is both a
+      ceiling on this function and a guarantee for every other one, so omitting it
+      leaves ingest sharing a single pool with the rest of the deployment: a leaked
+      token is still bounded, by the account's own allowance instead of by this value,
+      but it can now crowd out the console. The number is the default because that is
+      the posture the design asks for; the word is a deployment-time acknowledgement
+      that a particular account cannot offer it.
   MemorySize:
     Type: Number
     Default: 512
@@ -47,17 +74,33 @@ Parameters:
   LogRetentionDays:
     Type: Number
     Default: 7
-  EmbeddingModelArn:
+  EmbeddingModelId:
     Type: String
     Description: >-
-      Resource name of the embedding model the documented default provider calls.
-      Granting it keeps the default path deployable without a policy change; where
-      the configuration selects an external provider no model permission is used at
-      all.
-  PolicyLanguageVersion:
+      Identifier of the embedding model the selected provider calls. No default is
+      declared and none is invented here: the repository grounds no verified model
+      identifier, only the width the schema fixes, so this is an operator input the
+      parameter file supplies. The selected provider reads the identifier while it
+      is being built, so a selection made without one moves the startup refusal
+      rather than removing it.
+  CollectorExecutionRoleArn:
     Type: String
-    Description: Edition of the access-policy language every policy document declares.
-    AllowedPattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    Description: >-
+      Resource name of the ingest execution role, from the roles stack. Taken as a
+      value rather than declared here, because earlier stacks hold the policies that
+      name this role as a principal and a principal has to exist when those stacks
+      create the resources carrying them.
+
+# Whether the ingest ceiling is stated as a reservation at all. A reservation of zero
+# is not the way to omit one — zero throttles the function to nothing — so the property
+# is omitted rather than zeroed, and the function then draws on the account's shared
+# pool like every other.
+Conditions:
+  ReserveIngestConcurrency:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: ReservedConcurrency
+          - none
 
 Resources:
   CollectorLogGroup:
@@ -67,74 +110,6 @@ Resources:
         Fn::Sub: "/aws/lambda/${DeploymentName}-collector"
       RetentionInDays:
         Ref: LogRetentionDays
-
-  # Four parameter names, one model resource, one metric namespace, and one log
-  # group. Nothing else: this role cannot sign, cannot read or write the
-  # certificate bucket, and cannot reach another role's connection string.
-  CollectorExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: molt-collector-exec
-      AssumeRolePolicyDocument:
-        Version:
-          Ref: PolicyLanguageVersion
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: collector-least-privilege
-          PolicyDocument:
-            Version:
-              Ref: PolicyLanguageVersion
-            Statement:
-              - Sid: ReadOnlyItsOwnParameters
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                Resource:
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/store/dsn/writer"
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/collector/token"
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/collector/ingress-secret"
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/collector/ingress-max-age-seconds"
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/providers/embedding-credential"
-              - Sid: DecryptTheParameterEncryptionKey
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                Resource:
-                  Fn::Sub: "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
-              - Sid: InvokeTheEmbeddingModelOnly
-                Effect: Allow
-                Action:
-                  - bedrock:InvokeModel
-                Resource:
-                  Ref: EmbeddingModelArn
-              # The one statement in this deployment whose resource is open, and
-              # it is conditioned on the metric namespace because the operation
-              # accepts no resource of its own.
-              - Sid: PublishMetricsInTheMoltNamespaceOnly
-                Effect: Allow
-                Action:
-                  - cloudwatch:PutMetricData
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    cloudwatch:namespace: Molt
-              - Sid: WriteItsOwnLogStreamsOnly
-                Effect: Allow
-                Action:
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource:
-                  Fn::Sub:
-                    - "${LogGroupArn}:*"
-                    - LogGroupArn:
-                        Fn::GetAtt:
-                          - CollectorLogGroup
-                          - Arn
 
   CollectorFunction:
     Type: AWS::Lambda::Function
@@ -147,10 +122,13 @@ Resources:
         - arm64
       Handler:
         Ref: HandlerEntryPoint
+      # The roles stack creates the role this function runs under, and the
+      # deployment resolves its output into this parameter. Its permissions are
+      # the four parameter names, one model resource, one metric namespace, and
+      # this log group: it cannot sign, cannot reach the certificate bucket, and
+      # cannot read another role's connection string.
       Role:
-        Fn::GetAtt:
-          - CollectorExecutionRole
-          - Arn
+        Ref: CollectorExecutionRoleArn
       Code:
         S3Bucket:
           Ref: CodeBucket
@@ -161,15 +139,18 @@ Resources:
       Timeout:
         Ref: TimeoutSeconds
       ReservedConcurrentExecutions:
-        Ref: ReservedConcurrency
+        Fn::If:
+          - ReserveIngestConcurrency
+          - Ref: ReservedConcurrency
+          - Ref: AWS::NoValue
       LoggingConfig:
         LogGroup:
           Ref: CollectorLogGroup
       Environment:
         Variables:
-          MOLT_PARAMETER_PREFIX:
-            Ref: ParameterPrefix
-          MOLT_STORE_DSN_PARAM:
+          # Every name here is a key the configuration surface declares, which
+          # `tests/infra/test_templates.py` asserts.
+          MOLT_DSN_PARAM:
             Fn::Sub: "${ParameterPrefix}/store/dsn/writer"
           MOLT_COLLECTOR_TOKEN_PARAM:
             Fn::Sub: "${ParameterPrefix}/collector/token"
@@ -177,7 +158,21 @@ Resources:
             Fn::Sub: "${ParameterPrefix}/collector/ingress-secret"
           MOLT_EMBEDDING_CREDENTIAL_PARAM:
             Fn::Sub: "${ParameterPrefix}/providers/embedding-credential"
-          MOLT_STORE_ROLE: writer
+          # The selection this credential belongs to, stated rather than defaulted.
+          # The surface defaults the embedding role to the documented default
+          # provider, and this deployment must not take that default: the delivered
+          # account holds zero on-demand inference quota that cannot be raised, so
+          # the default provider's inference service refuses every call, and the
+          # credential named above belongs to the external service instead. Leaving
+          # the default in place hands this function one provider's credential while
+          # resolving the other. The external implementation is also the right
+          # target on its own merits, since residue detection searches for
+          # semantically similar source code and this is a code-specialised
+          # retrieval model.
+          MOLT_EMBEDDING_PROVIDER: external
+          MOLT_EMBEDDING_MODEL_ID:
+            Ref: EmbeddingModelId
+          MOLT_DB_ROLE: writer
 
   # The HTTPS endpoint. There is no load balancer and no custom domain: the
   # generated endpoint terminates transport security on its own certificate.
@@ -210,9 +205,9 @@ Outputs:
       Fn::GetAtt:
         - CollectorFunctionUrl
         - FunctionUrl
-  CollectorExecutionRoleArn:
-    Description: Resource name of the ingest execution role.
+  CollectorFunctionName:
+    Description: >-
+      Name of the ingest function. The execution role is no output of this stack
+      any more: the roles stack creates it and publishes its resource name.
     Value:
-      Fn::GetAtt:
-        - CollectorExecutionRole
-        - Arn
+      Ref: CollectorFunction

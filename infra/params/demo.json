@@ -1,5 +1,7 @@
 {
   "_note": "Non-secret deployment values only. Every secret is referenced by parameter name and its value is written straight into the parameter store by the provisioning scripts, so no secret value appears in this file, in a template, or in a deployment argument. Values a stack takes from an earlier stack's output are resolved by deploy.sh and are absent here.",
+  "_placeholders": "A value an operator must supply is written as REPLACE_WITH_ followed by upper-case words, and a comma-separated value is checked element by element, so a pair whose first element is real and whose second is not is caught. Every such value remaining is declared outstanding in the template suite together with the mechanism that supplies it, and the suite asserts both directions: a placeholder nothing accounts for is refused, and a value still accounted for after being supplied is refused too, so the declaration cannot outlive the gap. A deployment must not proceed while any of the declared values remains unsupplied. Both task stacks ran at a desired count of zero until an image existed, because a service creation waits for steady state and no task reaches it while the image its stack names is absent. The image is in the registry and both stacks name it by digest rather than by a tag, so a later push cannot change what a running task is. The watcher's count is one and it runs. The tool server's stays zero for a reason of its own, stated in its template: its delivered transport reads a peer on standard input, so it belongs to a server an agent spawns beside itself rather than to one a service keeps alive, and a service of it is a restart loop. What this stack deploys is the task definition and its roles.",
+  "_roles": "The roles stack holds no section of its own, and the omission is the configuration rather than an oversight. Its two model resource names default to empty and the grants naming them are stated only when a name is supplied, so leaving both out grants no model permission at all — which is what the delivered selection of the external provider for both provider roles means. They are omitted rather than written as empty values because an override carrying no value is read differently by different tooling, whereas an absent override resolves to the declared default every time. Supplying either one restores the documented default provider's path with no template change. Everything else the stack takes is a shared value.",
   "common": {
     "DeploymentName": "molt",
     "ParameterPrefix": "/molt",
@@ -21,6 +23,7 @@
     "VerifierRoleName": "molt-verifier"
   },
   "storage": {
+    "BucketNameSuffix": "-v3",
     "CertificatePrefix": "certificates/",
     "RetentionDays": "1",
     "CollectorExecutionRoleName": "molt-collector-exec",
@@ -28,24 +31,32 @@
     "VerifierRoleName": "molt-verifier"
   },
   "collector": {
-    "CodeBucket": "REPLACE_WITH_DEPLOYMENT_PACKAGE_BUCKET",
-    "CodeKey": "REPLACE_WITH_DEPLOYMENT_PACKAGE_KEY",
+    "CodeBucket": "molt-deploy-542489917358-us-east-1",
+    "CodeKey": "functions/molt-4721029760390acc.zip",
     "HandlerEntryPoint": "molt.collector.handler.handler",
-    "ReservedConcurrency": "10",
+    "ReservedConcurrency": "none",
     "MemorySize": "512",
     "TimeoutSeconds": "30",
-    "EmbeddingModelArn": "REPLACE_WITH_EMBEDDING_MODEL_RESOURCE_NAME"
+    "EmbeddingModelId": "voyage-code-3"
   },
   "console": {
-    "CodeBucket": "REPLACE_WITH_DEPLOYMENT_PACKAGE_BUCKET",
-    "CodeKey": "REPLACE_WITH_DEPLOYMENT_PACKAGE_KEY",
+    "CodeBucket": "molt-deploy-542489917358-us-east-1",
+    "CodeKey": "functions/molt-4721029760390acc.zip",
     "HandlerEntryPoint": "molt.console.handler.handler",
     "CheckpointEntryPoint": "checkpoint_signer",
     "CheckpointIntervalMinutes": "60",
     "MemorySize": "1024",
-    "TimeoutSeconds": "60",
+    "TimeoutSeconds": "900",
     "CertificatePrefix": "certificates/",
-    "TextModelArns": "REPLACE_WITH_ADJUDICATION_MODEL_RESOURCE_NAME,REPLACE_WITH_REWRITE_MODEL_RESOURCE_NAME"
+    "DemonstrationMode": "false",
+    "BackupTarget": "s3://molt-deploy-542489917358-us-east-1/backups",
+    "ClusterIdentifier": "97092d86-bbb6-4b44-8c7b-4fd784a82419",
+    "AdjudicationModelId": "claude-sonnet-4-6",
+    "RewriteModelId": "claude-haiku-4-5"
+  },
+  "gateway": {
+    "ThrottleRateLimit": "50",
+    "ThrottleBurstLimit": "100"
   },
   "cdn": {
     "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
@@ -53,17 +64,23 @@
     "PriceClassName": "PriceClass_100"
   },
   "watcher": {
-    "ImageUri": "REPLACE_WITH_TASK_IMAGE_REFERENCE",
+    "ImageUri": "542489917358.dkr.ecr.us-east-1.amazonaws.com/molt@sha256:1b62539b4e3b9a0bf1d9cde988b4c30006fef516ab8054b1181e086c0799524d",
+    "ImageRepositoryName": "molt",
     "TaskCpu": "256",
     "TaskMemory": "512",
+    "DesiredCount": "1",
     "PollIntervalSeconds": "2"
   },
   "mcp": {
-    "ImageUri": "REPLACE_WITH_TASK_IMAGE_REFERENCE",
+    "ImageUri": "542489917358.dkr.ecr.us-east-1.amazonaws.com/molt@sha256:1b62539b4e3b9a0bf1d9cde988b4c30006fef516ab8054b1181e086c0799524d",
+    "ImageRepositoryName": "molt",
     "TaskCpu": "256",
     "TaskMemory": "512",
+    "DesiredCount": "0",
+    "Transport": "stdio",
     "MaxResults": "50",
-    "PermittedClients": "REPLACE_WITH_TENANT_SLUG"
+    "EmbeddingModelId": "voyage-code-3",
+    "PermittedClients": "veltrine"
   },
   "observability": {
     "MetricNamespace": "Molt",

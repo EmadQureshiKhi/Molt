@@ -35,7 +35,23 @@ readonly REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly CCLOUD="${MOLT_CCLOUD_BIN:-ccloud}"
 readonly AWS_BIN="${MOLT_AWS_BIN:-aws}"
 readonly SQL_CLIENT="${MOLT_COCKROACH_BIN:-cockroach}"
-readonly PYTHON="python3.12"
+
+# The interpreter the repository's own helpers run under. It has to be one that holds
+# the pinned dependencies and the installed package, which the bare platform
+# interpreter does not, so naming that unconditionally made every helper fail on an
+# absent module rather than on anything to do with the provisioning. The order is the
+# test runner's and the deployment script's — an override, then an environment in the
+# working tree, then the platform interpreter — so every tool on one machine resolves
+# the same interpreter.
+if [[ -n "${MOLT_PYTHON:-}" ]]; then
+  readonly PYTHON="${MOLT_PYTHON}"
+elif [[ -x "${HOME}/.molt-venv/bin/python" ]]; then
+  readonly PYTHON="${HOME}/.molt-venv/bin/python"
+elif [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
+  readonly PYTHON="${REPO_ROOT}/.venv/bin/python"
+else
+  readonly PYTHON="python3.12"
+fi
 
 # The four service roles, and the parameter segment each one's connection string
 # is stored under.
@@ -196,7 +212,10 @@ create_service_account() {
     log "a service account for ${role} already exists, creating nothing"
     return 0
   fi
-  "${CCLOUD}" service-account create --name "${role}" --description "Molt ${role} role" >/dev/null
+  # The name is positional. It was written as a named option and the control plane
+  # refused the whole invocation on an unknown flag, which is a failure that arrives
+  # only when a deployment reaches this step for the first time.
+  "${CCLOUD}" service-account create "${role}" --description "Molt ${role} role" >/dev/null
   log "service account created for ${role}"
 }
 
@@ -218,9 +237,25 @@ provision_role_credential() {
   secret="$(generate_secret)"
   local statements
   statements="$(sql_file)"
+  # Creation and the password are separate statements, and the grant names the login
+  # rather than the login plus another suffix.
+  #
+  # The suffix was applied twice — the format string carried it and so did the
+  # argument — so the grant named a login nothing had created and the statement file
+  # failed partway through, after the login existed.
+  #
+  # That partial state is why the password is set by its own statement. Creating with
+  # a password under "if not exists" is a no-op when the login is already there, so a
+  # second run after a partial failure left the login holding the first run's password
+  # while storing the second run's in the parameter: a credential that cannot
+  # authenticate, stored as though it could, with nothing failing until a deployed
+  # process tried it. Reaching this point at all means the parameter held no value, so
+  # any existing login's password is unknown and setting it is the only way to make the
+  # stored string true.
   {
-    printf "CREATE USER IF NOT EXISTS %s_svc WITH PASSWORD '%s';\n" "${role}" "${secret}"
-    printf 'GRANT %s TO %s_svc;\n' "${role}" "${role}_svc"
+    printf 'CREATE USER IF NOT EXISTS %s_svc;\n' "${role}"
+    printf "ALTER USER %s_svc WITH PASSWORD '%s';\n" "${role}" "${secret}"
+    printf 'GRANT %s TO %s_svc;\n' "${role}" "${role}"
   } >>"${statements}"
   run_sql "${statements}"
   rm -f "${statements}"
@@ -235,31 +270,36 @@ provision_role_credential() {
 # it is granted on the views rather than on the tables, so the filter cannot be
 # stepped around.
 #
-# HANDOVER NOTE, from the session that wrote docs/auditor.md. Nothing below was
-# changed; documenting this function surfaced three places where it and the
-# requirements do not line up, and the decisions belong to whoever owns this file.
-# docs/auditor.md currently documents the narrower behaviour this script actually
-# has, so the guide is accurate either way and needs revisiting only if the script
-# changes.
+# A handover note listed three places where this function and the requirements did
+# not line up. Two of them are now closed here, and the third is left as it stands
+# because closing it would widen an auditor's reach rather than narrow it.
 #
-#   1. No named as-of-attribution view. Requirement 43.11 has the Auditor_Gateway
-#      expose the as-of query of Requirement 43.4 "through the read-only view set".
-#      Three views are created here and none is that one. The obligation is met only
-#      because the client_binding view happens to project valid_from, valid_to, and
-#      superseded_by, which leaves the as-of read as a predicate the auditor writes.
-#      If 43.11 means a named view, this function is one CREATE VIEW short.
+#   1. Closed. The as-of-attribution view of Requirement 43.11 is created below as
+#      auditor_<SLUG>.attribution_as_of, beside the other three and filtered the
+#      same way. It belongs here rather than in a migration for the same reason the
+#      other three do: the filter names one tenant's slug, so the object exists once
+#      per auditor and cannot be declared by a schema file that knows no auditor.
+#      A view takes no parameter, so the as-of instant cannot be bound inside it.
+#      What the view does is name the read and fix its projection to the columns the
+#      binding_as_of index stores, leaving the interval containment predicate as a
+#      WHERE the auditor writes over valid_from and valid_to. That is 43.11 in
+#      substance: the read is a named member of the view set rather than an
+#      incidental consequence of another view projecting the right columns, but the
+#      caller-supplied instant of Requirement 43.4 stays caller-supplied.
 #
-#   2. No control-plane service account per auditor. Requirement 24.4 asks for one
-#      ccloud service account per Auditor. create_service_account is called for the
-#      four service roles only; an auditor gets a database login with VALID UNTIL.
-#      The expiry obligation is satisfied; the control-plane account is not created.
+#   2. Closed. One control-plane service account per auditor, per Requirement 24.4,
+#      through the same create_service_account path the four service roles use. It
+#      runs before the credential check, so a re-run over an auditor whose
+#      connection string is already stored still establishes the account. The
+#      expiry obligation is unchanged: the database login keeps its VALID UNTIL.
 #
-#   3. molt_reader does not back these views. Migration 007 and the glossary both
-#      say the reader role is what the auditor views connect with. Select is granted
-#      directly to the per-auditor login here and molt_reader is never granted to
-#      it. Same posture, narrower reach: this login cannot read the tables
-#      molt_reader can, which is arguably the better outcome, but the three
-#      statements of it disagree and one of them should move.
+#   3. Left as it stands. Migration 007 and the glossary both say molt_reader is
+#      what the auditor views connect with, and SELECT is granted directly to the
+#      per-auditor login here instead. Same posture, narrower reach: this login
+#      cannot read the tables molt_reader can. Granting molt_reader here would
+#      widen an untrusted third party's access to close a documentation
+#      disagreement, so the disagreement is reported rather than resolved by this
+#      file, and migration 007's prose or the glossary is where it should move.
 provision_auditor() {
   local specification="$1"
   local auditor="${specification%%:*}"
@@ -267,6 +307,7 @@ provision_auditor() {
   [[ "${auditor}" != "${specification}" ]] || die "an auditor is given as SLUG:CLIENT_SLUG"
   check_identifier "${auditor}"
   check_identifier "${client}"
+  create_service_account "auditor_${auditor}"
   local parameter="${parameter_prefix}/auditor/${auditor}/dsn"
   if parameter_is_set "${parameter}"; then
     log "${parameter} already holds a value, rotating nothing"
@@ -278,7 +319,14 @@ provision_auditor() {
   local statements
   statements="$(sql_file)"
   {
-    printf "CREATE USER IF NOT EXISTS auditor_%s WITH PASSWORD '%s' VALID UNTIL '%s';\n" \
+    # Creation and the credential are separate statements, for the reason the service
+    # role's are: creating with a password under "if not exists" is a no-op when the
+    # login already exists, so a re-run after a partial failure would store a password
+    # the login does not hold. The validity bound is set alongside it, because a
+    # re-issued credential with the first run's expiry is a login that stops working
+    # earlier than the parameter says.
+    printf 'CREATE USER IF NOT EXISTS auditor_%s;\n' "${auditor}"
+    printf "ALTER USER auditor_%s WITH PASSWORD '%s' VALID UNTIL '%s';\n" \
       "${auditor}" "${secret}" "$(expiry_instant)"
     printf 'CREATE SCHEMA IF NOT EXISTS auditor_%s;\n' "${auditor}"
     printf 'GRANT USAGE ON SCHEMA auditor_%s TO auditor_%s;\n' "${auditor}" "${auditor}"
@@ -288,9 +336,20 @@ provision_auditor() {
       "${auditor}" "'${client}'"
     printf 'CREATE OR REPLACE VIEW auditor_%s.client_binding AS SELECT * FROM client_binding WHERE client_id IN (SELECT id FROM client WHERE slug = %s);\n' \
       "${auditor}" "'${client}'"
+    # The as-of-attribution read, named. The projection is exactly the key and
+    # stored columns of the binding_as_of index, so the read stays a range scan
+    # over one artifact's versions with no row fetch, which is what holds the bound
+    # the as-of query is required to answer within. The artifact kind is
+    # deliberately absent for that reason; the client_binding view beside this one
+    # carries it. The instant is the auditor's: the interval is half-open, so the
+    # containment predicate is valid_from <= the instant AND (valid_to IS NULL OR
+    # valid_to > the instant).
+    printf 'CREATE OR REPLACE VIEW auditor_%s.attribution_as_of AS SELECT id, artifact_id, client_id, method, confidence, valid_from, valid_to, superseded_by FROM client_binding WHERE client_id IN (SELECT id FROM client WHERE slug = %s);\n' \
+      "${auditor}" "'${client}'"
     printf 'GRANT SELECT ON auditor_%s.ledger TO auditor_%s;\n' "${auditor}" "${auditor}"
     printf 'GRANT SELECT ON auditor_%s.erasure_run TO auditor_%s;\n' "${auditor}" "${auditor}"
     printf 'GRANT SELECT ON auditor_%s.client_binding TO auditor_%s;\n' "${auditor}" "${auditor}"
+    printf 'GRANT SELECT ON auditor_%s.attribution_as_of TO auditor_%s;\n' "${auditor}" "${auditor}"
   } >>"${statements}"
   run_sql "${statements}"
   rm -f "${statements}"

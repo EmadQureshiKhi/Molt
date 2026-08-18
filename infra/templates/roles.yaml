@@ -1,0 +1,339 @@
+# Why this stack exists at all, and why its own description does not say so: the
+# platform caps a template description at 1024 characters, and the reasoning is longer
+# than the cap. A comment carries no cap, so the reasoning lives here.
+#
+# The key policy names the console execution role as its one signing principal and as
+# the excepted principal of its denial, and the bucket policy names all three roles.
+# The platform validates that a named principal exists at the moment the key and the
+# bucket are created, so a role created two stacks later is not late — it is a create
+# failure, which is how this stack came to be written.
+#
+# Reordering alone cannot fix it, because the roles' own permissions name the key and
+# the bucket: identity and resource reference each other. The cycle is broken by
+# separating the two. This stack creates each role with its trust policy and only the
+# permissions whose resource is constructible from the account, the region, and a
+# parameter, so it resolves nothing from a later stack. The key stack and the storage
+# stack attach the rest to these roles by name, once the resources those permissions
+# name exist.
+#
+# Nothing here is coupled to the signing key or the certificate bucket. The signing
+# permission in particular is absent by construction: the key stack attaches it to one
+# role, which is what keeps a single signing principal.
+Description: >-
+  The three identities the rest of the deployment names as principals — the ingest
+  execution role, the console execution role, and the verifier — created before any
+  resource whose policy names them, each holding only the permissions that name no
+  resource a later stack creates.
+
+Parameters:
+  DeploymentName:
+    Type: String
+    Description: >-
+      Prefix the log group names these roles write to carry. The two function
+      stacks create the log groups themselves; a log group's name is derived from
+      this prefix, so the write grant is constructible here even though the group
+      comes into existence later.
+    Default: molt
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+  ParameterPrefix:
+    Type: String
+    Default: /molt
+    Description: Hierarchy prefix the parameter names are declared under.
+  EmbeddingModelArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Resource name of the embedding model the documented default provider calls,
+      empty to grant no model permission at all. Declared here rather than in the
+      function stack because the statement naming it is held by the role rather than
+      by the function, and the role is created here.
+
+      Empty is the delivered value, and it is a real configuration rather than an
+      unfinished one: the delivered selection is the external provider for both
+      provider roles, so nothing in the delivered path ever calls the default
+      provider's inference service and the permission would never be used. It is also
+      the only value that deploys. The platform requires this to be a well-formed
+      resource name or a wildcard, so a placeholder makes role creation refuse
+      outright, and a wildcard would grant every model in the account to keep a
+      statement nobody exercises. Supplying a real name restores the default path
+      without a template change.
+  TextModelArns:
+    Type: String
+    Default: ""
+    Description: >-
+      Resource names of the adjudication and rewrite models the documented default
+      provider calls, comma separated, empty to grant no model permission. Empty for
+      the same reason as the embedding model above. Held as one string rather than a
+      list so that emptiness is expressible: a list type admits no empty value the
+      condition below could test.
+  VerifierSessionSeconds:
+    Type: Number
+    Description: >-
+      Ceiling on one assumed verifier session. A verification is a single read of a
+      public key and a certificate object, so the ceiling is short: a session that
+      outlives the check it was assumed for is a credential nobody is watching.
+    Default: 3600
+    MinValue: 900
+  PolicyLanguageVersion:
+    Type: String
+    Description: Edition of the access-policy language every policy document declares.
+    AllowedPattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+
+# Whether either model grant is stated at all. A grant naming no resource cannot be
+# written — the platform requires a well-formed resource name or a wildcard — so the
+# statement is omitted rather than emptied, and the role then holds no model permission
+# instead of holding one over everything.
+Conditions:
+  GrantEmbeddingModel:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: EmbeddingModelArn
+          - ""
+  GrantTextModels:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: TextModelArns
+          - ""
+
+Resources:
+  # Four parameter names, one model resource, one metric namespace, and one log
+  # group. Nothing else: this role cannot sign, cannot read or write the
+  # certificate bucket, and cannot reach another role's connection string. The
+  # storage stack attaches nothing to it, because it reads nothing there.
+  CollectorExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: molt-collector-exec
+      AssumeRolePolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: collector-least-privilege
+          PolicyDocument:
+            Version:
+              Ref: PolicyLanguageVersion
+            Statement:
+              - Sid: ReadOnlyItsOwnParameters
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/store/dsn/writer"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/collector/token"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/collector/ingress-secret"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/collector/ingress-max-age-seconds"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/providers/embedding-credential"
+              - Sid: DecryptTheParameterEncryptionKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource:
+                  Fn::Sub: "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+              # Stated only when a model resource name was supplied. The delivered
+              # configuration supplies none, so this role holds no model permission.
+              - Fn::If:
+                  - GrantEmbeddingModel
+                  - Sid: InvokeTheEmbeddingModelOnly
+                    Effect: Allow
+                    Action:
+                      - bedrock:InvokeModel
+                    Resource:
+                      Ref: EmbeddingModelArn
+                  - Ref: AWS::NoValue
+              # The one statement in this deployment whose resource is open, and
+              # it is conditioned on the metric namespace because the operation
+              # accepts no resource of its own.
+              - Sid: PublishMetricsInTheMoltNamespaceOnly
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Molt
+              # The function stack creates the log group, and its name derives
+              # from the deployment name, so this grant is written out rather
+              # than read from an output.
+              - Sid: WriteItsOwnLogStreamsOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Sub: "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${DeploymentName}-collector:*"
+
+  # The role the signing permission is attached to, by the key stack and by
+  # nothing else. What it holds here is everything the key and the bucket are not
+  # part of: its own parameter names, the two text models, its metric namespace,
+  # and its own log streams.
+  ConsoleExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: molt-console-exec
+      AssumeRolePolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Sid: TheConsoleFunctionRunsAsThisRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+          # An operator of this account may also assume this role, and the reason is a
+          # property of the erasure path rather than a convenience.
+          #
+          # An Erasure_Run is a batch: it detects residue by vector similarity across a
+          # tenant's whole corpus, then rewrites every blended Artifact that has to survive
+          # without the erased tenant's content, and each rewrite is a model call. That
+          # takes longer than a function is allowed to live, so a run started in the
+          # console advances through its phases and is cut off — the phase marker is
+          # durable and the run is resumable, but no certificate is produced.
+          #
+          # The run therefore has somewhere to be performed from that has no request
+          # timeout, and this is the principal it must be performed as: signing a
+          # certificate and writing it to the evidence bucket are granted to this role and
+          # to nothing else, deliberately, and that claim is asserted across every stack.
+          # An operator assuming this role *is* this role, so the claim is unchanged — a
+          # second principal granted the signing operation would break it, and this is not
+          # one.
+          #
+          # It is narrowed to a principal of this account, which is the same boundary the
+          # key policy and the bucket policy already draw.
+          - Sid: AnOperatorOfThisAccountMayPerformARunAsThisRole
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: console-least-privilege
+          PolicyDocument:
+            Version:
+              Ref: PolicyLanguageVersion
+            Statement:
+              - Sid: ReadOnlyItsOwnParameters
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/store/dsn/eraser"
+                  # The read-only connection the Sensitivity_Analyzer insists on.
+                  # Read alongside the eraser string rather than instead of it,
+                  # because the two serve different views of the same function.
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/store/dsn/reader"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/console/credential"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/console/session-key"
+                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/providers/text-credential"
+              # The console hands an Erasure_Run to a second invocation of its own
+              # function, because the host suspends the environment once a response is
+              # written and a thread started to outlive the request is frozen mid-run. The
+              # grant names that one function, constructed from the deployment name, so it
+              # admits invoking itself and nothing else.
+              #
+              # It is the same function rather than a worker of its own for a reason this
+              # deployment asserts elsewhere: the console's role is the single principal
+              # permitted to sign a certificate and to write to the evidence bucket, and a
+              # separate worker would need that grant duplicated.
+              - Sid: DispatchItsOwnErasureWorker
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  Fn::Sub: "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentName}-console"
+              - Sid: DecryptTheParameterEncryptionKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource:
+                  Fn::Sub: "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
+              # Stated only when model resource names were supplied, as above.
+              - Fn::If:
+                  - GrantTextModels
+                  - Sid: InvokeTheAdjudicationAndRewriteModelsOnly
+                    Effect: Allow
+                    Action:
+                      - bedrock:InvokeModel
+                    Resource:
+                      Fn::Split:
+                        - ","
+                        - Ref: TextModelArns
+                  - Ref: AWS::NoValue
+              - Sid: PublishMetricsInTheMoltNamespaceOnly
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: Molt
+              - Sid: WriteItsOwnLogStreamsOnly
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  Fn::Sub: "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${DeploymentName}-console:*"
+
+  # The verifier, which is an operator or auditor principal rather than a service:
+  # the design names it that way, and everything it does — read the public key,
+  # read a certificate object, recompute a digest locally — is done by a person
+  # checking evidence, not by a process this deployment runs. So no service is
+  # trusted here. The account's own principals are trusted instead, narrowed by
+  # requiring a multi-factor session: a trust policy naming a service would let a
+  # deployed function assume the auditor, and a bare account trust would let any
+  # long-lived automation credential in the account do the same, whereas a
+  # multi-factor session is a human at the point of assuming it. The account is
+  # the trust boundary the rest of this deployment already uses — the bucket
+  # policy and the key policy both name its root — so trusting it here adds no
+  # reach beyond that boundary, and the role deliberately holds no signing
+  # permission anywhere, which is what makes an auditor's read harmless.
+  #
+  # This role declares no permission of its own, because every permission it has
+  # names either the signing key or the certificate bucket: the key stack attaches
+  # the public-key read and the storage stack attaches the certificate read.
+  VerifierRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: molt-verifier
+      MaxSessionDuration:
+        Ref: VerifierSessionSeconds
+      AssumeRolePolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Sid: AnOperatorOrAuditorOfThisAccountWithAMultiFactorSession
+            Effect: Allow
+            Principal:
+              AWS:
+                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:root"
+            Action: sts:AssumeRole
+            Condition:
+              Bool:
+                aws:MultiFactorAuthPresent: true
+
+Outputs:
+  CollectorExecutionRoleArn:
+    Description: Resource name of the ingest execution role, for the ingest function.
+    Value:
+      Fn::GetAtt:
+        - CollectorExecutionRole
+        - Arn
+  ConsoleExecutionRoleArn:
+    Description: Resource name of the console execution role, for the console function.
+    Value:
+      Fn::GetAtt:
+        - ConsoleExecutionRole
+        - Arn
+  VerifierRoleArn:
+    Description: Resource name of the verifier role, which an auditor assumes.
+    Value:
+      Fn::GetAtt:
+        - VerifierRole
+        - Arn

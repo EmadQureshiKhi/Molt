@@ -1,0 +1,218 @@
+# Why this stack exists, stated here because the reasoning is longer than the platform's
+# cap on a template description.
+#
+# Both functions already publish an endpoint of their own, and on this account neither
+# can be reached. A function endpoint configured for anonymous access answers every
+# anonymous request with a refusal from the platform rather than from the application:
+# the endpoint's authentication type is set to none, the function's resource policy
+# grants the anonymous principal the endpoint invocation, and the request is refused
+# anyway. The configuration is correct and the account is not permitted to use it, which
+# is the same restriction that refuses a content distribution outright until the provider
+# verifies the account. Verification is a support request measured in days.
+#
+# A regional endpoint is not subject to it. This stack puts one in front of each
+# function, which makes the deployment reachable now, and it is the answer rather than a
+# workaround for three reasons.
+#
+# It costs nothing per hour. The cost ceiling rules out a load balancer because a load
+# balancer is charged by the hour whether or not anything calls it; this is charged per
+# request and by nothing else, so an idle deployment costs what an idle deployment should.
+# That is the same test the ceiling applies to every other resource here, and this passes
+# it where a load balancer does not.
+#
+# It changes no application code and no other stack. Each endpoint carries every request
+# through to its function unchanged — one route matching any method and any path — so the
+# request the function receives is the request it received before, and the two functions
+# keep their own endpoints for direct invocation.
+#
+# It is what a distribution would sit in front of. When the account is verified, the
+# distribution names this endpoint as its origin rather than replacing it, and a custom
+# domain attaches to either.
+#
+# Nothing here authenticates a caller, and that is deliberate rather than overlooked. The
+# console authenticates every route it serves except its sign-in page, its health report,
+# and its own interface specification, so an endpoint that admitted only authenticated
+# callers would refuse the sign-in page and no one could ever sign in. The ingest function
+# requires a bearer value on every route but its health report, and a signature in
+# addition on the two routes that write. Authentication belongs to the application on both
+# sides, which is where it can distinguish a route that must be public from one that must
+# not.
+
+Description: >-
+  A regional endpoint in front of each function, because a function's own endpoint cannot
+  serve anonymous requests on an unverified account. Each carries every method and path
+  through unchanged, authenticates nobody — the applications do that — and is charged per
+  request rather than per hour.
+
+Parameters:
+  DeploymentName:
+    Type: String
+    Default: molt
+    AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
+    Description: >-
+      Prefix both function names are derived from. The function names are constructed
+      here rather than resolved from the two function stacks' outputs, because a name
+      derived from this prefix is the same name those stacks derive it into, and a
+      resolved value would make this stack wait on an output that says nothing the prefix
+      does not. The stacks must still be deployed first — a permission naming a function
+      that does not exist is refused — and the deployment order is what settles that.
+  # The stage is the platform's unnamed one and is not a parameter, because any other
+  # value changes every address this deployment publishes. A named stage becomes the first
+  # path segment of the endpoint, so the console would be served under a prefix while
+  # every link and stylesheet reference in its own pages is written from the root — the
+  # pages would load and their links would not. The unnamed stage serves at the root,
+  # which is the only shape that leaves the application's own paths correct.
+  ThrottleRateLimit:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    Description: >-
+      Steady request rate each endpoint admits, per second. This is the ceiling the
+      ingest function's own reserved concurrency would have been, and it matters more
+      here than it did there: the account's whole concurrency allowance equals the floor
+      the platform insists stays unreserved, so no function can reserve any of it and a
+      leaked credential would otherwise be bounded by nothing this deployment controls.
+      A throttle at the endpoint is the bound that remains available.
+  ThrottleBurstLimit:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    Description: >-
+      How far above the steady rate a momentary burst may go. Above the rate because a
+      batch flushed after an outage arrives as a burst and is the traffic this system is
+      built to accept; bounded because a burst nobody bounded is the leaked-credential
+      case again.
+
+Resources:
+  # -- the console -----------------------------------------------------------
+  ConsoleApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name:
+        Fn::Sub: "${DeploymentName}-console"
+      ProtocolType: HTTP
+      Description: The console's public endpoint.
+      # No cross-origin configuration, because there is no other origin: the console
+      # serves its own pages and its own stylesheet, and a browser calling it is calling
+      # the address it was served from. Declaring an allowance here would widen what a
+      # page from somewhere else may do with a signed-in session.
+
+  ConsoleIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: ConsoleApi
+      IntegrationType: AWS_PROXY
+      # The request reaches the function in the same shape its own endpoint delivers, so
+      # the handler reads one event format rather than two.
+      PayloadFormatVersion: "2.0"
+      IntegrationUri:
+        Fn::Sub: "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentName}-console"
+      TimeoutInMillis: 30000
+
+  # One route for every method and every path. The console's route table is the thing
+  # that decides which paths exist and which of them authenticate, so a route list
+  # repeated here would be a second answer to that question and would drift from the
+  # first.
+  ConsoleRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: ConsoleApi
+      RouteKey: $default
+      Target:
+        Fn::Sub: "integrations/${ConsoleIntegration}"
+
+  ConsoleStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId:
+        Ref: ConsoleApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingRateLimit:
+          Ref: ThrottleRateLimit
+        ThrottlingBurstLimit:
+          Ref: ThrottleBurstLimit
+
+  # The endpoint is permitted to invoke this function and no other, and only requests
+  # arriving through this endpoint are permitted, which is what the source condition
+  # states. Without it the grant would admit any endpoint of the account.
+  ConsoleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::Sub: "${DeploymentName}-console"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ConsoleApi}/*/*"
+
+  # -- the ingest function --------------------------------------------------
+  CollectorApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name:
+        Fn::Sub: "${DeploymentName}-collector"
+      ProtocolType: HTTP
+      Description: The ingest function's public endpoint.
+
+  CollectorIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId:
+        Ref: CollectorApi
+      IntegrationType: AWS_PROXY
+      PayloadFormatVersion: "2.0"
+      IntegrationUri:
+        Fn::Sub: "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${DeploymentName}-collector"
+      TimeoutInMillis: 30000
+
+  CollectorRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId:
+        Ref: CollectorApi
+      RouteKey: $default
+      Target:
+        Fn::Sub: "integrations/${CollectorIntegration}"
+
+  CollectorStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId:
+        Ref: CollectorApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingRateLimit:
+          Ref: ThrottleRateLimit
+        ThrottlingBurstLimit:
+          Ref: ThrottleBurstLimit
+
+  CollectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::Sub: "${DeploymentName}-collector"
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${CollectorApi}/*/*"
+
+Outputs:
+  ConsoleEndpoint:
+    Description: Address the console is reached at, which a reviewer opens.
+    Value:
+      Fn::Sub: "https://${ConsoleApi}.execute-api.${AWS::Region}.amazonaws.com/"
+  CollectorEndpoint:
+    Description: Address the capture side posts Events to and asks recall of.
+    Value:
+      Fn::Sub: "https://${CollectorApi}.execute-api.${AWS::Region}.amazonaws.com/"
+  ConsoleEndpointDomain:
+    Description: >-
+      Host part of the console's address, which a distribution takes as its origin once
+      the account is permitted to create one.
+    Value:
+      Fn::Sub: "${ConsoleApi}.execute-api.${AWS::Region}.amazonaws.com"

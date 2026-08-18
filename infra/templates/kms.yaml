@@ -1,10 +1,19 @@
 Description: >-
-  The asymmetric signing key certificates and ledger checkpoints are signed with.
+  The asymmetric signing key certificates and ledger checkpoints are signed with,
+  and the two identity policies that grant it to the roles the key policy names.
   The signing operation is granted to exactly one principal, the console execution
   role, and is denied to every other principal including the account
   administrative path. That exclusivity is the reason the checkpoint signer is
   hosted inside the console function rather than in a task of its own: a second
   signing principal would end it.
+
+  Why the grants are here rather than with the roles. The key policy names two role
+  resource names as principals, and the platform validates that a principal exists
+  when the key is created, so the roles stack creates both roles ahead of this
+  one. Their side of the grant names this key, which does not exist until this
+  stack creates it, so it is attached here to the roles by name. That split is what
+  removes the cycle: the roles stack references nothing this stack creates, and this
+  stack references roles that already exist.
 
 Parameters:
   DeploymentName:
@@ -16,12 +25,15 @@ Parameters:
     Type: String
     Description: >-
       Name of the console execution role, which is the one principal permitted to
-      sign. The console stack declares that role under this same name, so this stack
-      names it without depending on it.
+      sign. The roles stack creates that role under this same name before this stack
+      is deployed, so the key policy names an existing principal and the signing
+      grant below attaches to an existing role, neither by way of an output.
     Default: molt-console-exec
   VerifierRoleName:
     Type: String
-    Description: Name of the verifier role, which may read the public key and no more.
+    Description: >-
+      Name of the verifier role, which may read the public key and no more. Created
+      by the roles stack, like the console role above.
     Default: molt-verifier
   PolicyLanguageVersion:
     Type: String
@@ -86,18 +98,84 @@ Resources:
             Action:
               - kms:GetPublicKey
             Resource: "*"
-          # The exclusivity, stated rather than implied. Every principal other
-          # than the console execution role is denied the signing operation, so
-          # the administrative statement above cannot be widened into a second
-          # signing principal by adding an action to it.
+          # The exclusivity, stated rather than implied. Every principal other than the
+          # console execution role is denied the signing operation, so the administrative
+          # statement above cannot be widened into a second signing principal by adding
+          # an action to it.
+          #
+          # The exception is expressed as a condition on the requesting principal rather
+          # than with a not-principal element, and the difference is not stylistic: it is
+          # the difference between this policy working and this policy denying the one
+          # role it means to allow.
+          #
+          # A not-principal element naming a role's own name is matched against the
+          # principal that made the request, and a function does not make requests as its
+          # role — it makes them as a session assumed from that role, which is a
+          # different name. So the exception matched nothing the function ever sent, the
+          # denial applied to it, and signing failed for the single principal the
+          # statement above grants it to. That is what happened: the scheduled checkpoint
+          # ran on time and every run failed on an explicit denial, which reads like a
+          # missing grant and is the opposite of one.
+          #
+          # The condition key below resolves to the role for a session assumed from it,
+          # so it matches whether the caller is the role or a session of it. The claim is
+          # unchanged and now holds for the caller that actually exists.
           - Sid: NoOtherPrincipalMaySign
             Effect: Deny
-            NotPrincipal:
-              AWS:
-                Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${ConsoleExecutionRoleName}"
+            Principal: "*"
             Action:
               - kms:Sign
             Resource: "*"
+            Condition:
+              StringNotLike:
+                aws:PrincipalArn:
+                  Fn::Sub: "arn:aws:iam::${AWS::AccountId}:role/${ConsoleExecutionRoleName}"
+
+  # The console role's side of the signing grant, attached to the role the roles
+  # stack already created. This is the only identity policy in the deployment that
+  # carries the signing operation, and there is exactly one role in its subject
+  # list, so the exclusivity the key policy states is matched on the identity side.
+  ConsoleExecutionRoleSigningPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: console-signing
+      Roles:
+        - Ref: ConsoleExecutionRoleName
+      PolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Sid: SignCertificatesAndCheckpoints
+            Effect: Allow
+            Action:
+              - kms:Sign
+              - kms:GetPublicKey
+            Resource:
+              Fn::GetAtt:
+                - SigningKey
+                - Arn
+
+  # The verifier's side, which is the public half and nothing else. A verification
+  # recomputes a digest locally and checks a signature against this key; it never
+  # produces one.
+  VerifierRolePublicKeyPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: verifier-public-key
+      Roles:
+        - Ref: VerifierRoleName
+      PolicyDocument:
+        Version:
+          Ref: PolicyLanguageVersion
+        Statement:
+          - Sid: ReadThePublicKeyOnly
+            Effect: Allow
+            Action:
+              - kms:GetPublicKey
+            Resource:
+              Fn::GetAtt:
+                - SigningKey
+                - Arn
 
   SigningKeyAlias:
     Type: AWS::KMS::Alias

@@ -16,13 +16,21 @@ Parameters:
     Default: molt
     AllowedPattern: "^[a-z][a-z0-9-]{1,30}$"
     Description: Prefix the distribution comment carries.
-  ConsoleFunctionUrlDomain:
+  ConsoleOriginDomain:
     Type: String
     Description: >-
-      Host name of the console function endpoint, taken from the console stack's
-      output with the scheme and the trailing separator removed. It is a generated
-      cloud host name rather than a secret, and it is supplied at deployment time
-      rather than written into this template.
+      Host name this distribution fetches the console from. It is a generated cloud host
+      name rather than a secret, and it is supplied at deployment time rather than
+      written into this template.
+
+      It is the regional endpoint's host rather than the console function's own, and the
+      difference is load-bearing. A function's own endpoint is refused by the platform for
+      every anonymous request on an account the provider has not verified, however
+      correct its resource policy, so a distribution fetching from it would be a
+      distribution that could reach nothing — and the failure would surface as the
+      distribution's own error page rather than as anything about the origin. The
+      parameter was named for the function endpoint while it held one; it is named for
+      what it is now.
   CachePolicyId:
     Type: String
     Description: >-
@@ -59,7 +67,7 @@ Resources:
         Origins:
           - Id: console-function-endpoint
             DomainName:
-              Ref: ConsoleFunctionUrlDomain
+              Ref: ConsoleOriginDomain
             CustomOriginConfig:
               OriginProtocolPolicy: https-only
               OriginSSLProtocols:

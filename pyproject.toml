@@ -85,6 +85,13 @@ markers = [
   "mcp: exercises the tool registry and the server transports",
   "quality: static type, lint, and format gates over the tracked source",
   "spec: interface specification parsing and coverage assertions",
+  # A test whose subject is contention against a bounded retry budget. Such a test
+  # measures the conflict it creates itself, so unrelated load applied at the same time
+  # does not make it stricter, it makes its measurement describe something else: the
+  # budget is spent on the neighbours and the test reports exhaustion where the property
+  # it asserts actually holds. Both marked cases were observed failing under parallel
+  # execution and passing on their own. They are run in a pass of their own instead.
+  "serial: measures its own contention, so it must not share the instance",
 ]
 
 # --------------------------------------------------------------------------

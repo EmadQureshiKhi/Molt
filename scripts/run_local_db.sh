@@ -38,7 +38,19 @@ readonly DB_HOST="${MOLT_LOCAL_DB_HOST:-localhost}"
 readonly DB_NAME="${MOLT_LOCAL_DB_NAME:-molt_test}"
 readonly DB_USER="${MOLT_LOCAL_DB_USER:-root}"
 readonly BINARY="${MOLT_COCKROACH_BIN:-cockroach}"
-readonly PYTHON="python3.12"
+# The interpreter the repository's own helpers run under, resolved in the test runner's
+# order — an override, then an environment in the working tree, then the platform
+# interpreter — so the local instance and the suites that use it resolve the same
+# interpreter rather than differing by which script started first.
+if [[ -n "${MOLT_PYTHON:-}" ]]; then
+  readonly PYTHON="${MOLT_PYTHON}"
+elif [[ -x "${HOME}/.molt-venv/bin/python" ]]; then
+  readonly PYTHON="${HOME}/.molt-venv/bin/python"
+elif [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
+  readonly PYTHON="${REPO_ROOT}/.venv/bin/python"
+else
+  readonly PYTHON="python3.12"
+fi
 readonly READY_ATTEMPTS=60
 
 log() {

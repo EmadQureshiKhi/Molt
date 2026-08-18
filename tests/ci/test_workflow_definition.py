@@ -29,16 +29,22 @@ from ruamel.yaml import YAML
 REPOSITORY_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH: Final[Path] = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
 
-# The seven invocations the workflow owes, named by role. The order of this
-# tuple is the order the definition must declare them in.
+# The invocations the workflow owes, named by role. The order of this tuple is the
+# order the definition must declare them in: the four static checks, then the
+# hygiene check, then the suites.
 STRICT_TYPE_CHECK: Final[str] = "strict type check"
 IGNORE_ALLOWLIST_CHECK: Final[str] = "type-ignore allowlist check"
 LINTER_CHECK: Final[str] = "linter check"
 FORMATTER_CHECK: Final[str] = "formatter check"
 HYGIENE_CHECK: Final[str] = "metadata-hygiene check"
 UNIT_SUITE: Final[str] = "unit suite"
+QUALITY_SUITE: Final[str] = "quality suite"
 PROPERTY_SUITE: Final[str] = "property suite"
 
+# The quality suite sits between the other two deliberately. It holds the gates over
+# the suites themselves, and one of them — the per-example deadline convention every
+# property module owes — is a gate on the property suite, so a module that would fail
+# on a busy machine has to be reported before the generative run rather than after it.
 EXPECTED_ORDER: Final[tuple[str, ...]] = (
     STRICT_TYPE_CHECK,
     IGNORE_ALLOWLIST_CHECK,
@@ -46,17 +52,26 @@ EXPECTED_ORDER: Final[tuple[str, ...]] = (
     FORMATTER_CHECK,
     HYGIENE_CHECK,
     UNIT_SUITE,
+    QUALITY_SUITE,
     PROPERTY_SUITE,
 )
 
-# The four static checks of the typing requirement, and the two test suites.
+# The four static checks of the typing requirement. The suites are not listed here:
+# they are read off the definition below, so a suite added to the workflow is covered
+# by the credential-freeness assertions without this module being told about it twice.
 STATIC_CHECKS: Final[tuple[str, ...]] = (
     STRICT_TYPE_CHECK,
     IGNORE_ALLOWLIST_CHECK,
     LINTER_CHECK,
     FORMATTER_CHECK,
 )
-TEST_SUITES: Final[tuple[str, ...]] = (UNIT_SUITE, PROPERTY_SUITE)
+
+# The directory each suite step names, by the role that step plays.
+SUITE_DIRECTORIES: Final[Mapping[str, str]] = {
+    "tests/unit": UNIT_SUITE,
+    "tests/quality": QUALITY_SUITE,
+    "tests/property": PROPERTY_SUITE,
+}
 
 # The markers that gate on a reachable instance, on cloud and model provider
 # credentials, or on both. A suite step must deselect each of them, which is
@@ -197,10 +212,9 @@ def _role_of(step: Step) -> str | None:
     if any(token.endswith("hygiene.py") for token in tokens):
         return HYGIENE_CHECK
     if "pytest" in tokens:
-        if "tests/unit" in tokens:
-            return UNIT_SUITE
-        if "tests/property" in tokens:
-            return PROPERTY_SUITE
+        for directory, role in SUITE_DIRECTORIES.items():
+            if directory in tokens:
+                return role
     return None
 
 
@@ -233,12 +247,34 @@ def _marker_expression(step: Step) -> str:
     return ""
 
 
+def _declared_suites(steps: Sequence[Step]) -> tuple[str, ...]:
+    """The suite roles the definition actually declares, in declaration order.
+
+    Read off the steps rather than listed by hand, so a suite step added to the
+    workflow is carried into the credential-freeness assertions by the definition
+    itself. A step that runs the test runner over something this module cannot
+    classify is a finding rather than a step quietly left out of those assertions.
+    """
+    found: list[str] = []
+    for step in steps:
+        if "pytest" not in step.tokens:
+            continue
+        role = _role_of(step)
+        assert role is not None, (
+            f"step {step.index} of job {step.job} runs a suite this module cannot name"
+        )
+        if role not in found:
+            found.append(role)
+    return tuple(found)
+
+
 WORKFLOW: Final[Mapping[str, object]] = _load_workflow()
 STEPS: Final[tuple[Step, ...]] = _collect_steps(WORKFLOW)
 ROLE_POSITIONS: Final[Mapping[str, tuple[int, ...]]] = {
     role: tuple(position for position, step in enumerate(STEPS) if _role_of(step) == role)
     for role in EXPECTED_ORDER
 }
+TEST_SUITES: Final[tuple[str, ...]] = _declared_suites(STEPS)
 
 
 def test_every_expected_invocation_appears_exactly_once() -> None:
@@ -246,26 +282,44 @@ def test_every_expected_invocation_appears_exactly_once() -> None:
         assert len(ROLE_POSITIONS[role]) == 1, f"the {role} is not declared exactly once"
 
 
-def test_the_seven_invocations_are_declared_in_the_fixed_order() -> None:
+def test_every_expected_invocation_is_declared_in_the_fixed_order() -> None:
     positions = [ROLE_POSITIONS[role][0] for role in EXPECTED_ORDER]
     assert positions == sorted(positions)
     assert len(set(positions)) == len(EXPECTED_ORDER)
 
 
-def test_the_seven_invocations_share_one_job() -> None:
+def test_every_expected_invocation_shares_one_job() -> None:
     jobs = {STEPS[ROLE_POSITIONS[role][0]].job for role in EXPECTED_ORDER}
     assert len(jobs) == 1
 
 
-def test_the_four_static_checks_precede_both_suites() -> None:
+def test_the_declared_suites_are_the_expected_ones() -> None:
+    """The suites read off the definition are the suites the fixed order names."""
+    declared = set(TEST_SUITES)
+    assert tuple(role for role in EXPECTED_ORDER if role in declared) == TEST_SUITES
+    assert declared == {UNIT_SUITE, QUALITY_SUITE, PROPERTY_SUITE}
+
+
+def test_the_four_static_checks_precede_every_suite() -> None:
     latest_static = max(ROLE_POSITIONS[role][0] for role in STATIC_CHECKS)
     earliest_suite = min(ROLE_POSITIONS[role][0] for role in TEST_SUITES)
     assert latest_static < earliest_suite
 
 
-def test_the_hygiene_check_precedes_both_suites() -> None:
+def test_the_hygiene_check_precedes_every_suite() -> None:
     earliest_suite = min(ROLE_POSITIONS[role][0] for role in TEST_SUITES)
     assert ROLE_POSITIONS[HYGIENE_CHECK][0] < earliest_suite
+
+
+def test_the_quality_suite_precedes_the_property_suite() -> None:
+    """The gate on the property suite runs before the run it gates.
+
+    The quality suite holds the per-example deadline convention every property module
+    owes. A module that configures its examples and leaves the wall-clock deadline in
+    place passes on an idle machine and fails on a busy one, so it has to be named
+    before the generative run rather than after it.
+    """
+    assert ROLE_POSITIONS[QUALITY_SUITE][0] < ROLE_POSITIONS[PROPERTY_SUITE][0]
 
 
 def test_the_formatter_runs_in_check_mode() -> None:
@@ -328,7 +382,7 @@ def test_no_step_declares_a_credential_shaped_environment_key() -> None:
             assert "credential" not in folded
 
 
-def test_both_suites_deselect_every_credential_gated_marker() -> None:
+def test_every_suite_deselects_every_credential_gated_marker() -> None:
     for role in TEST_SUITES:
         step = STEPS[ROLE_POSITIONS[role][0]]
         expression = _normalise(_marker_expression(step))

@@ -28,7 +28,20 @@ set -o pipefail
 
 readonly REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly CCLOUD="${MOLT_CCLOUD_BIN:-ccloud}"
-readonly PYTHON="python3.12"
+# The interpreter the repository's own helpers run under. The capability probe imports
+# the package itself, so the bare platform interpreter fails it on an absent module and
+# the cluster is left provisioned with no capability record. The order is the test
+# runner's and the deployment script's, so every tool on one machine resolves the same
+# interpreter.
+if [[ -n "${MOLT_PYTHON:-}" ]]; then
+  readonly PYTHON="${MOLT_PYTHON}"
+elif [[ -x "${HOME}/.molt-venv/bin/python" ]]; then
+  readonly PYTHON="${HOME}/.molt-venv/bin/python"
+elif [[ -x "${REPO_ROOT}/.venv/bin/python" ]]; then
+  readonly PYTHON="${REPO_ROOT}/.venv/bin/python"
+else
+  readonly PYTHON="python3.12"
+fi
 readonly MOLT="${MOLT_CLI_BIN:-molt}"
 # The control plane offers backup listing and backup configuration and offers no
 # operation that creates one, which is the observation the probe records.
@@ -108,9 +121,14 @@ create_cluster() {
     return 0
   fi
   log "creating the cluster"
-  local -a create=("${CCLOUD}" cluster create --name "${cluster_name}" --plan "${cluster_plan}")
+  # The plan, the name, and the regions are positional, in that order. They were
+  # written as named options, which the control plane refuses outright on an unknown
+  # flag — so the creation failed before it began, and only on the one run that
+  # actually had a cluster to create. Still one argument vector: nothing is assembled
+  # into a shell word, so a value carrying a separator cannot become two arguments.
+  local -a create=("${CCLOUD}" cluster create "${cluster_plan}" "${cluster_name}")
   if [[ -n "${cluster_region}" ]]; then
-    create+=(--region "${cluster_region}")
+    create+=("${cluster_region}")
   fi
   "${create[@]}" >/dev/null
   log "cluster created"

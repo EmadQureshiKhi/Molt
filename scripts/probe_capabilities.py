@@ -79,9 +79,15 @@ EXIT_OK: Final[int] = 0
 EXIT_OPERATIONAL: Final[int] = 1
 EXIT_USAGE: Final[int] = 2
 
-# Configuration keys read here, spelled once.
-EMBEDDING_PROVIDER_KEY: Final[str] = "providers.embedding"
-TEXT_PROVIDER_KEY: Final[str] = "providers.text"
+# The configuration surface is read by a setting's environment name rather than by its
+# key. Both spellings exist for every setting and only one of them resolves, so naming
+# the key here meant every provider build raised an unknown-setting fault before a
+# provider was selected. The consequence was quiet rather than loud: the two provider
+# probes are reported as a warning and the run still succeeds, so the prompt-cache
+# capability was left permanently unprobed and the text provider always took the
+# unprobed path, on every cluster this had ever been run against.
+EMBEDDING_PROVIDER_ENV: Final[str] = "MOLT_EMBEDDING_PROVIDER"
+TEXT_PROVIDER_ENV: Final[str] = "MOLT_TEXT_PROVIDER"
 
 
 def _rangefeed_enabled(store: MemoryStore) -> bool:
@@ -138,8 +144,8 @@ def required_model_probes(configuration: Configuration) -> tuple[ProbeLike, ...]
     and an operator who selects a different provider changes a configuration value
     rather than this module.
     """
-    embedding = load_embedding_builder(configuration.text(EMBEDDING_PROVIDER_KEY))(configuration)
-    text = load_text_builder(configuration.text(TEXT_PROVIDER_KEY))(configuration)
+    embedding = load_embedding_builder(configuration.text(EMBEDDING_PROVIDER_ENV))(configuration)
+    text = load_text_builder(configuration.text(TEXT_PROVIDER_ENV))(configuration)
     return (embedding.probe(), text.probe())
 
 

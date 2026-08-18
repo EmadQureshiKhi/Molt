@@ -1,9 +1,23 @@
+# The reasoning is a comment rather than part of the description below, because the
+# platform caps a template description at 1024 characters and refuses the template
+# outright when it is longer. A comment carries no cap.
+#
+# The checkpoint signer is hosted in this function rather than in a task of its own
+# because the signing operation is granted to this one role, and a second signing
+# principal would end that exclusivity.
+#
+# The execution role is not declared here. The roles stack creates it, ahead of the key
+# and the bucket, because the key policy names this role as its one signing principal
+# and the bucket policy names it too, and the platform validates that a named principal
+# exists when those resources are created. The signing grant and the certificate grant
+# are attached to that role by the key stack and the storage stack, each naming the
+# resource it creates. This stack takes the role's resource name as a parameter and runs
+# the function under it, so the role the signer uses is the role the key policy excepts
+# from its denial.
 Description: >-
-  The console function, its HTTPS function endpoint, its execution role, its log
-  group, and the scheduled rule that invokes the checkpoint signer entry point
-  inside the same function. The signer is hosted here rather than in a task of its
-  own because the signing operation is granted to this one role and a second
-  signing principal would end that exclusivity.
+  The console function, its HTTPS function endpoint, its log group, and the scheduled
+  rule that invokes the checkpoint signer entry point inside the same function. It runs
+  under the console execution role the roles stack creates rather than declaring one.
 
   Authentication posture, stated plainly. The function endpoint declares no request
   signing, because the distribution in front of it is the only caller that is meant
@@ -54,25 +68,90 @@ Parameters:
   LogRetentionDays:
     Type: Number
     Default: 7
+  ConsoleExecutionRoleArn:
+    Type: String
+    Description: >-
+      Resource name of the console execution role, from the roles stack. Taken as a
+      value rather than created here, because the key policy and the bucket policy
+      name this role as a principal and a principal has to exist when they are
+      created.
   SigningKeyArn:
     Type: String
-    Description: Resource name of the signing key, from the key stack.
-  CertificateBucketArn:
+    Description: >-
+      Resource name of the signing key, from the key stack. Read by the process as
+      the key it signs with; the permission to do so is attached to the role by the
+      key stack, which is the stack that knows the key's resource name.
+  CertificateBucketName:
     Type: String
-    Description: Resource name of the certificate bucket, from the storage stack.
+    Description: >-
+      Name of the certificate bucket, from the storage stack. The name rather than
+      the resource name, because the process writes to a bucket by name; the grant
+      that admits the write is stated by resource name in the storage stack, which
+      is the stack that creates the bucket.
   CertificatePrefix:
     Type: String
     Default: certificates/
-    Description: Key prefix within the bucket this role may write.
-  TextModelArns:
-    Type: CommaDelimitedList
     Description: >-
-      Resource names of the adjudication and rewrite models the documented default
-      provider calls.
-  PolicyLanguageVersion:
+      Key prefix within the bucket the process writes under. It must be the prefix
+      the storage stack narrows this role's grant to: a process configured with a
+      different one is refused by the bucket policy.
+  AdjudicationModelId:
     Type: String
-    Description: Edition of the access-policy language every policy document declares.
-    AllowedPattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    Description: >-
+      Identifier of the model the adjudication role calls. No default is declared
+      and none is invented here: the repository grounds no verified model
+      identifier, only the shape each model is verified against, so this is an
+      operator input the parameter file supplies.
+  BackupTarget:
+    Type: String
+    Description: >-
+      Where a pre-erasure backup is written. The erasure path reads it before it mutates
+      anything, and it carries no default on the configuration surface, so a console that
+      was never given one refuses every run it is asked to start.
+
+      That refusal was invisible until an erasure was started on a deployment: the request
+      is recorded and answered with its identifier, the work happens in a second
+      invocation, and the missing value surfaced there as an aborted run rather than as a
+      refused request. A console that cannot back up cannot erase, and it should say so
+      when it is deployed rather than when it is used.
+  ClusterIdentifier:
+    Type: String
+    Description: >-
+      The cluster the control-plane backup path names. It is a non-secret identifier the
+      provider assigns, and the path that uses it is taken only where the capability
+      record says the control plane offers an on-demand backup; where it does not, the
+      self-managed path runs instead and this value is unused.
+  DemonstrationMode:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: >-
+      Whether this console serves an anonymous reviewer rather than an operator.
+
+      In demonstration mode a visitor is given a session without presenting a
+      credential, so every read-only page is reachable by opening the address, and every
+      route that would change stored memory is refused — the control is still rendered,
+      disabled, stating why, so a reviewer sees what the console can do rather than a
+      page with the capability hidden. The refused set is derived from the route table's
+      own methods rather than from a list kept beside it, so a mutating route added later
+      is refused without anyone remembering to add it.
+
+      The tenant roster is narrowed to the seeded tenants in this mode as well, which is
+      what keeps a public demonstration off anything a real engagement created.
+
+      It defaults to false because an operator console is the ordinary case and a
+      deployment that served an anonymous session by default would be one nobody had
+      decided to make public.
+
+  RewriteModelId:
+    Type: String
+    Description: >-
+      Identifier of the model the redaction rewrite role calls. Separate from the
+      adjudication identifier because the two text roles share one provider and name
+      different models, so a single value would answer which provider without
+      answering which model.
 
 Resources:
   ConsoleLogGroup:
@@ -82,96 +161,6 @@ Resources:
         Fn::Sub: "/aws/lambda/${DeploymentName}-console"
       RetentionInDays:
         Ref: LogRetentionDays
-
-  # The one role in this deployment holding the signing permission. It also holds
-  # the certificate prefix of the bucket and nothing else of it, and the eraser
-  # connection string rather than the writer's.
-  ConsoleExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: molt-console-exec
-      AssumeRolePolicyDocument:
-        Version:
-          Ref: PolicyLanguageVersion
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: console-least-privilege
-          PolicyDocument:
-            Version:
-              Ref: PolicyLanguageVersion
-            Statement:
-              - Sid: ReadOnlyItsOwnParameters
-                Effect: Allow
-                Action:
-                  - ssm:GetParameter
-                  - ssm:GetParameters
-                Resource:
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/store/dsn/eraser"
-                  # The read-only connection the Sensitivity_Analyzer insists on. Read
-                  # alongside the eraser string rather than instead of it, because the
-                  # two serve different views of the same function.
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/store/dsn/reader"
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/console/credential"
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/console/session-key"
-                  - Fn::Sub: "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/providers/text-credential"
-              - Sid: DecryptTheParameterEncryptionKey
-                Effect: Allow
-                Action:
-                  - kms:Decrypt
-                Resource:
-                  Fn::Sub: "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm"
-              # The signing permission, on one key, held by this role alone. The
-              # checkpoint signer uses the same grant from the same function.
-              - Sid: SignCertificatesAndCheckpoints
-                Effect: Allow
-                Action:
-                  - kms:Sign
-                  - kms:GetPublicKey
-                Resource:
-                  Ref: SigningKeyArn
-              - Sid: WriteAndReadCertificatesUnderTheirPrefixOnly
-                Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:GetObject
-                  - s3:GetObjectVersion
-                Resource:
-                  Fn::Sub:
-                    - "${BucketArn}/${Prefix}*"
-                    - BucketArn:
-                        Ref: CertificateBucketArn
-                      Prefix:
-                        Ref: CertificatePrefix
-              - Sid: InvokeTheAdjudicationAndRewriteModelsOnly
-                Effect: Allow
-                Action:
-                  - bedrock:InvokeModel
-                Resource:
-                  Ref: TextModelArns
-              - Sid: PublishMetricsInTheMoltNamespaceOnly
-                Effect: Allow
-                Action:
-                  - cloudwatch:PutMetricData
-                Resource: "*"
-                Condition:
-                  StringEquals:
-                    cloudwatch:namespace: Molt
-              - Sid: WriteItsOwnLogStreamsOnly
-                Effect: Allow
-                Action:
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource:
-                  Fn::Sub:
-                    - "${LogGroupArn}:*"
-                    - LogGroupArn:
-                        Fn::GetAtt:
-                          - ConsoleLogGroup
-                          - Arn
 
   ConsoleFunction:
     Type: AWS::Lambda::Function
@@ -184,10 +173,16 @@ Resources:
         - arm64
       Handler:
         Ref: HandlerEntryPoint
+      # The roles stack creates the role this function runs under, and the
+      # deployment resolves its output into this parameter. It is the one role the
+      # key policy excepts from its denial of the signing operation, and the key
+      # stack attaches that grant to it; the storage stack attaches the
+      # certificate-prefix grant. Everything not coupled to those two resources —
+      # the eraser and reader connection strings, the console credential and
+      # session key, the text credential, the two text models, the metric
+      # namespace, and this log group — is held by the role itself.
       Role:
-        Fn::GetAtt:
-          - ConsoleExecutionRole
-          - Arn
+        Ref: ConsoleExecutionRoleArn
       Code:
         S3Bucket:
           Ref: CodeBucket
@@ -202,9 +197,11 @@ Resources:
           Ref: ConsoleLogGroup
       Environment:
         Variables:
-          MOLT_PARAMETER_PREFIX:
-            Ref: ParameterPrefix
-          MOLT_STORE_DSN_PARAM:
+          # Every name here is a key the configuration surface declares. A name the
+          # surface does not declare is read by nothing, so it would leave the value
+          # it carries unresolved and the process refusing at startup for a value an
+          # operator can see is set. `tests/infra/test_templates.py` asserts the set.
+          MOLT_DSN_PARAM:
             Fn::Sub: "${ParameterPrefix}/store/dsn/eraser"
           # The console holds the eraser role because the erasure console runs
           # erasures from this same function. The Sensitivity_Analyzer refuses any
@@ -218,9 +215,43 @@ Resources:
             Fn::Sub: "${ParameterPrefix}/console/session-key"
           MOLT_TEXT_CREDENTIAL_PARAM:
             Fn::Sub: "${ParameterPrefix}/providers/text-credential"
-          MOLT_STORE_ROLE: eraser
+          # The selection this credential belongs to, stated rather than defaulted.
+          # The surface defaults the text role to the documented default provider,
+          # and this deployment must not take that default: the delivered account
+          # holds zero on-demand inference quota that cannot be raised, so the
+          # default provider's inference service refuses every call, and the
+          # credential named above belongs to the external service instead. Leaving
+          # the default in place hands this function one provider's credential while
+          # resolving the other. The external implementation also carries the cost
+          # argument, since adjudication repeats one byte-identical prefix across
+          # every review-band candidate and prompt caching turns that into one paid
+          # write and many cheap reads.
+          MOLT_TEXT_PROVIDER: external
+          # Both text roles name their own model against that one provider, and
+          # neither key carries a default, so a selection without both identifiers
+          # moves the startup refusal rather than removing it.
+          MOLT_ADJUDICATION_MODEL_ID:
+            Ref: AdjudicationModelId
+          MOLT_REWRITE_MODEL_ID:
+            Ref: RewriteModelId
+          MOLT_DEMO_MODE:
+            Ref: DemonstrationMode
+          MOLT_BACKUP_TARGET:
+            Ref: BackupTarget
+          MOLT_CCLOUD_CLUSTER_ID:
+            Ref: ClusterIdentifier
+          MOLT_DB_ROLE: eraser
           MOLT_KMS_KEY_ID:
             Ref: SigningKeyArn
+          # The bucket and the prefix the certificate writer uses. Both are given
+          # here rather than left to a configuration file, because the bucket name
+          # is generated from the account and the region and the prefix is the same
+          # one the write grant above narrows to: a process configured with a
+          # different prefix from its grant is refused by the bucket policy.
+          MOLT_CERT_BUCKET:
+            Ref: CertificateBucketName
+          MOLT_CERT_PREFIX:
+            Ref: CertificatePrefix
 
   ConsoleFunctionUrl:
     Type: AWS::Lambda::Url
@@ -283,9 +314,10 @@ Outputs:
       Fn::GetAtt:
         - ConsoleFunctionUrl
         - FunctionUrl
-  ConsoleExecutionRoleArn:
-    Description: Resource name of the console execution role, the one signing principal.
+  ConsoleFunctionName:
+    Description: >-
+      Name of the console function. The execution role is no output of this stack
+      any more: the roles stack creates it and publishes its resource name, and the
+      one signing principal is that role.
     Value:
-      Fn::GetAtt:
-        - ConsoleExecutionRole
-        - Arn
+      Ref: ConsoleFunction

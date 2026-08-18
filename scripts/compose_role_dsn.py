@@ -12,7 +12,11 @@ the password are percent-encoded rather than concatenated. The password arrives 
 standard input and never as an argument, so it is never visible in the process
 table, and the composed string goes to the parameter write on standard output and
 to nothing else. Full certificate verification is required in the composed string,
-because a connection string that omits it would let a role connect without it.
+because a connection string that omits it would let a role connect without it, and
+the authority set that verification checks against is named alongside it, because a
+connection string that requires verification without naming one cannot connect at
+all from a runtime that holds no authority file — which is every runtime this
+deployment runs on.
 
 Computing the auditor expiry instant is done here so that no instant is ever
 written into a tracked file: the interval is the input, and the instant is produced
@@ -28,8 +32,23 @@ from datetime import UTC, datetime, timedelta
 from typing import Final
 from urllib.parse import quote, urlencode
 
-# The transport security mode every composed connection string requires.
+# The transport security mode every composed connection string requires, and the
+# authority set the server's certificate is verified against.
+#
+# Naming the authority set is not optional alongside the mode, and leaving it out is
+# what made every deployed process unable to connect. Full verification with no
+# authority named sends the client looking for a certificate file in the calling
+# user's home directory. No function runtime and no task image holds one, so the
+# connection was refused before any request left the process, and the fault named a
+# missing file in a home directory rather than anything about the cluster or the
+# deployment. The managed cluster presents a publicly trusted certificate, so naming
+# the platform's own trust store verifies the chain and the host name against public
+# authorities — which is what full verification is for — while shipping no authority
+# file and pinning nothing that rotates.
 REQUIRED_SSL_MODE: Final[str] = "verify-full"
+REQUIRED_ROOT_AUTHORITY: Final[str] = "system"
+SSL_MODE_PARAMETER: Final[str] = "sslmode"
+ROOT_AUTHORITY_PARAMETER: Final[str] = "sslrootcert"
 
 # The fields a cluster description may carry its host under, in the order they are
 # looked for. A description that carries none is a fault rather than a default.
@@ -80,7 +99,12 @@ def cluster_host(document: object) -> str | None:
 def compose_dsn(user: str, host: str, password: str, *, port: int = DEFAULT_PORT) -> str:
     """Compose one connection string with every component encoded and verification required."""
     credential = f"{quote(user, safe='')}:{quote(password, safe='')}"
-    query = urlencode({"sslmode": REQUIRED_SSL_MODE})
+    query = urlencode(
+        {
+            SSL_MODE_PARAMETER: REQUIRED_SSL_MODE,
+            ROOT_AUTHORITY_PARAMETER: REQUIRED_ROOT_AUTHORITY,
+        }
+    )
     return f"postgresql://{credential}@{host}:{port}/{quote(DATABASE_NAME, safe='')}?{query}"
 
 
