@@ -9,30 +9,55 @@ references unchanged. Nothing is added to either list, and nothing is dropped fr
 one because it is inconvenient.
 
 **Two criteria are not met.** No public demonstration web application is deployed,
-and no recording exists; the script a recording would follow is not yet written
-either. Both are stated as not delivered below rather than described in terms of the
-code that would serve them.
+and no recording exists. The script a recording would follow does now exist, as
+[demo.md](demo.md), so what is missing for the second is the recording rather than
+the plan. Both are stated as not delivered below rather than described in terms of
+the code that would serve them.
 
-Two things bound how the rest should be read. The README's status section is older
-than several of the modules it lists as outstanding, so where that section and this
-one disagree, the paths in these tables are the check. And the whole-system run is a
-scheduled deliverable rather than a gap in the design: the full-flow test of task
-32.1 lands in `tests/e2e/`, and until it does, every status below is a status about
-parts and their coverage. Where a row reads *pending the full-flow test*, that names
-the task that closes it.
+Two things bound how the rest should be read. Where the README's status section and
+this one disagree, the paths in these tables are the check, because a path can be
+opened and a status cannot. And the whole-system run now exists: `tests/e2e/test_full_flow.py` drives seed, signed ingest,
+confidence-weighted recall, sensitivity analysis, checkpoint, leased erase,
+certify, and verify in that order against a live instance, and it passes. So the
+statuses below are no longer statuses about parts alone.
+
+What that run establishes, stated narrowly. The eight stages compose: each one's
+output is the next one's input, in one history rather than eight setups. The
+certificate an authorised erasure produced verifies against the erased cluster —
+the outcome an independent verification reports is the verified one, not merely
+that a document was produced and parses. Its counts are confirmed through the
+derived mechanism, so the agreement does not depend on the garbage-collection
+horizon. And four of its fields each agree with a stored row: the ownership
+generation with the lease the run held, the named checkpoint with the checkpoint
+row the cluster stores, the first-attribution pair with the attribution rows read
+before the disposition phase removed the rest, and the working-rows-deleted count
+with the number of Working_Memory rows the tenant held before the run and holds
+after.
+
+What it does not establish. The run uses stub model and embedding providers and a
+stub object store, and it signs with a local key rather than through the key
+service, so what is exercised is the assembly and verification path rather than
+those services' participation in it. And it runs against a local instance and a
+schema of its own, so what it establishes is the path rather than the deployment.
+
+The deployment is separate evidence and it now exists: eleven of twelve stacks run in a
+live account against a managed cluster, and the README's [what is
+deployed](../README.md#what-is-deployed) section states each fact with the value it was
+verified at. Where a row below still reads *not exercised*, it means the deployment does
+not reach that particular claim rather than that no deployment exists.
 
 ## Hard requirements at a glance
 
 | Criterion | Requirements | Primary evidence | Status |
 |---|---|---|---|
-| Agentic application using CockroachDB as persistent memory | 7–15, 40, 42, 43, 45, 49 | `src/molt/store/`, migrations 001–015, `src/molt/models/tiers.py` | Met |
-| Deployed on AWS | 34, 25 | `infra/templates/` (ten stacks), `infra/deploy.sh`, `tests/infra/test_templates.py` | Definitions delivered, deployment not performed |
+| Agentic application using CockroachDB as persistent memory | 7–15, 40, 42, 43, 45, 49 | `src/molt/store/`, migrations 001–022, `src/molt/models/tiers.py` | Met, and exercised against a managed cluster: twenty two migrations applied, four least-privilege roles, a seeded corpus, semantic recall answered from the distributed vector index, and a governed erasure completed with a signed certificate that verifies |
+| Deployed on AWS | 34, 25 | `infra/templates/` (twelve stacks), `infra/deploy.sh`, `tests/infra/test_templates.py` | Met — eleven of twelve stacks deployed and exercised in a live account; the content distribution is refused until the provider verifies the account, and the `gateway` stack makes the deployment publicly reachable without it |
 | At least two CockroachDB tools (five used) | 24, 10, 19, 23.14, 27, 27.10, 39, 23 | Migration 003, `src/molt/policy/watcher.py`, `scripts/provision_*.sh`, `skills/` | Met |
-| At least one AWS service | 34, 30, 33 | `infra/templates/kms.yaml`, `storage.yaml`, `parameters.yaml`, `observability.yaml`, `cdn.yaml` | Declared and template-tested, not exercised in a live account |
-| Public repo with README, dependencies, example config, seed data, setup instructions, MIT licence | 35, 28, 30.10, 50.8, 51 | `README.md`, `pyproject.toml`, `config.example.toml`, `src/molt/seed/`, [setup.md](setup.md), `LICENSE` | Met, except that publication is out of scope for this tree |
-| Functional public demo web app | 25, 34.2, 34.9, 48.10, 49.16, 51.4 | `src/molt/console/`, `web/templates/`, `infra/templates/console.yaml` | **Not met** — nothing is deployed and no URL exists |
+| At least one AWS service | 34, 30, 33 | `infra/templates/kms.yaml`, `storage.yaml`, `parameters.yaml`, `observability.yaml`, `gateway.yaml` | Met and exercised live: the parameter store holds every credential the deployment reads, the asymmetric key and the Object Lock bucket back the certificate path, functions serve both surfaces, two task services run, and the regional endpoints carry public traffic |
+| Public repo with README, dependencies, example config, seed data, setup instructions, MIT licence | 35, 28, 30.10, 50.8, 51 | `README.md`, `pyproject.toml`, `config.example.toml`, `src/molt/seed/`, [setup.md](setup.md), `LICENSE` | Met |
+| Functional public demo web app | 25, 34.2, 34.9, 48.10, 49.16, 51.4 | `src/molt/console/`, `web/templates/`, `infra/templates/console.yaml`, `gateway.yaml` | Met — the console is deployed at its own domain, signs an operator in, and renders every page from the live cluster over a seeded corpus. An erasure can be started from it, and the certificate a completed run produced is served and verified through it |
 | Video under three minutes showing the memory layer | 35.9 | none | **Not met** — no recording, and no script for one |
-| Documentation of CockroachDB tools and AWS services used | 34.7, 34.8, 34.12, 37.13, 37.14, 42.14, 51.5 | [architecture.md](architecture.md), [platform.md](platform.md), [mcp.md](mcp.md), [skills.md](skills.md), [providers.md](providers.md), `infra/README.md` | Met for tools and services; the cost record is not yet written |
+| Documentation of CockroachDB tools and AWS services used | 34.7, 34.8, 34.12, 37.13, 37.14, 42.14, 51.5 | [architecture.md](architecture.md), [platform.md](platform.md), [mcp.md](mcp.md), [skills.md](skills.md), [providers.md](providers.md), [cost.md](cost.md), `infra/README.md` | Met; the cost record labels each figure measured, derived, or estimated, and records request-unit consumption as outstanding |
 | Architecture diagram | 35.5 | `assets/molt-architecture.svg`, rendered in [architecture.md](architecture.md) and in the README | Met |
 
 ## Judging criteria at a glance
@@ -41,7 +66,7 @@ the task that closes it.
 |---|---|---|---|
 | Agentic Memory Design | 42, 7, 9–14, 25, 40, 43, 49 | `src/molt/models/tiers.py`, [memory-tiers.md](memory-tiers.md), `src/molt/store/attribution.py`, `src/molt/store/confidence.py` | Met |
 | Technical Implementation | 8, 15–18, 20–23, 36, 37, 43, 44, 45, 46, 47, 48, 50 | `src/molt/store/chain.py`, `src/molt/store/fencing.py`, `src/molt/collector/ingress.py`, `tests/property/` | Met |
-| Real-World Impact | 16–18, 21, 22, 24, 25, 39, 40, 43, 48, 51 | `src/molt/erase/`, `src/molt/attest/`, `skills/`, `docs/interface.json` | Met in code; whole-run confirmation pending the full-flow test of task 32.1 |
+| Real-World Impact | 16–18, 21, 22, 24, 25, 39, 40, 43, 48, 51 | `src/molt/erase/`, `src/molt/attest/`, `skills/`, `tests/e2e/test_full_flow.py`, `docs/interface.json` | Met, and confirmed as one run against a live instance; not against a deployment |
 | Production Readiness | 27, 30–38, 41, 44–47, 50, 51 | `scripts/`, `infra/`, `.github/workflows/ci.yml`, [typing.md](typing.md), [hygiene.md](hygiene.md), [threat-model.md](threat-model.md) | Met, with the open findings in [reviews.md](reviews.md) |
 | Creativity & Originality | 17, 18, 21–23, 29, 37, 39, 42, 44, 45, 48 | `src/molt/erase/residue.py`, `src/molt/erase/sensitivity.py`, `src/molt/attest/checkpoint.py` | Met |
 
@@ -58,7 +83,7 @@ cannot drift from the taxonomy it describes.
 
 | Claim | Evidence |
 |---|---|
-| Schema and its two generations | `src/molt/store/migrations/001_core.sql` through `015_diff_summary.sql`; `tests/integration/test_schema_shape.py`, `test_schema_shape_amended.py` |
+| Schema and its two generations | `src/molt/store/migrations/001_core.sql` through `022_eraser_cascade_deletes.sql` — twenty two files, twenty nine tables; `tests/integration/test_schema_shape.py`, `test_schema_shape_amended.py` |
 | Append-only episodic tier with a per-session digest chain | `src/molt/store/chain.py`; `tests/integration/test_ledger_chain_live.py`, `tests/property/test_p06_chain_tamper.py` |
 | Semantic recall over a distributed vector index | `src/molt/store/embeddings.py`, `src/molt/recall/`; `tests/integration/test_recall_engine.py`, `tests/perf/test_recall_latency.py` |
 | Bitemporal attribution | `src/molt/store/attribution.py`; `tests/integration/test_attribution_supersession.py`, `tests/property/test_p32_attribution_history.py` |
@@ -111,8 +136,10 @@ path in `tests/unit/test_secrets_accessor.py`.
 The requirements table states the Bedrock exception rather than hiding it: on-demand
 inference quota is zero and non-adjustable on the delivered account, so model
 inference moved off Bedrock while Bedrock remains the documented default under 37.3
-and 37.6. See [providers.md](providers.md). Nothing here has been exercised against
-a live account, because nothing is deployed.
+and 37.6. See [providers.md](providers.md). Both selected providers are exercised in the
+live deployment: each model identifier was verified against its provider before being
+written into the deployment, the embedding model answers the 1024 dimensions the schema
+and the index are declared at, and the capability probe records both as reachable.
 
 ## Public repo with README, dependencies, example config, seed data, setup instructions, MIT licence
 
@@ -134,14 +161,35 @@ tree is hosted rather than something this tree does.
 
 ## Functional public demo web app
 
-Requirements 25, 34.2, 34.9, 48.10, 49.16, and 51.4. **Not met.**
+Requirements 25, 34.2, 34.9, 48.10, 49.16, and 51.4. **Met.**
 
-The console exists as code and templates — thirteen route modules under
-`src/molt/console/routes/`, sixteen templates under `web/templates/`, unit coverage
-across `tests/unit/test_console_*.py`, and a stack definition in
-`infra/templates/console.yaml` — but it is not deployed, so there is no public
-application and no URL. A reviewer can read the routes and run the unit suite; a
-reviewer cannot visit anything.
+The console is deployed at its own domain, the address the README names, so a reviewer
+visits it rather than reading about it. It signs in with the operator credential the README
+publishes, and every page renders from the live cluster over a seeded corpus.
+
+It is a working console rather than a read-only one, and that is a deliberate change from
+how it was first deployed. Read-only demonstration mode issued a visitor a session and
+refused every route that would change stored memory, which meant the two beats that matter
+most — an Erasure_Run and the certificate it produces — were the two a visitor could not
+reach, and a system whose whole claim is provable forgetting was asking to be taken on
+trust. So the mode is off, anonymous access is refused in its place, and a reviewer can
+start a run. The mode itself remains implemented, and the set it refuses is still derived
+from the route table's own methods rather than from a list kept beside it.
+
+Behind it: fourteen modules under `src/molt/console/routes/`, of which twelve are the view
+modules the package's own import list registers, seventeen templates under
+`web/templates/`, unit coverage across `tests/unit/test_console_*.py`, and a stack
+definition in `infra/templates/console.yaml`. The two modules that are not view modules
+are shared code rather than unregistered routes: `erasure_common.py` for what the erasure
+views share, and `tenancy.py` for the Client roster and the page-rendering helper the
+fleet, Session, and lineage views read — which is also the one place the demonstration
+roster is narrowed, and the one place the active navigation section is supplied.
+
+Deploying it is what established that the view package was imported by nothing, so every
+page answered *not implemented* while eighteen written handlers sat unreferenced and the
+unit suite passed against handlers the application never attached. That is finding AG in
+[reviews.md](reviews.md), and a gate now asserts the join by building the routes through
+the application's own call and refusing any route the placeholder would answer.
 
 Two open findings bear on what a deployment would show, and both are recorded in
 [reviews.md](reviews.md): the read-only connection the sensitivity grid requires,
@@ -151,13 +199,14 @@ and the configured signing key live certificate verification needs.
 
 Requirement 35.9. **Not met.**
 
-No recording exists. The demonstration script Requirement 35.9 obliges the
-documentation to carry — capture on two machines, semantic recall changing an agent
-decision, residue detection, an erasure run, and certificate verification — is not
-yet written; it is intended as `docs/demo.md`, which does not exist. The sequence a
-recording would follow is the sequence the full-flow test of task 32.1 executes, so
-that test lands first and the script follows it rather than being invented beside
-it.
+No recording exists. What is delivered is the script rather than the recording: the
+demonstration script Requirement 35.9 obliges the documentation to carry — capture on
+two machines, semantic recall changing an agent decision, residue detection, an
+erasure run, and certificate verification — is [demo.md](demo.md), with its shot
+list, its timings, and the command behind each beat. The sequence it follows is the
+sequence `tests/e2e/test_full_flow.py` executes, so the order was taken from a run
+rather than invented. The criterion stays not met because a script is not a
+recording, and because the deployment the script is written against does not exist.
 
 ## Documentation of CockroachDB tools and AWS services used
 
@@ -173,10 +222,14 @@ cluster offers no column-scoped `UPDATE` grant and no updatable view narrowed to
 writable columns — is recorded in [protection.md](protection.md) and
 [reviews.md](reviews.md), with the guards it forced in migration 014.
 
-One document in this group is missing: the cost record, which Requirements 33.5,
-33.6, and 38.6 oblige. It is intended as `docs/cost.md` and is not yet written,
-because it needs measured storage, request-unit, and prompt-cache figures that no
-run in this tree has produced.
+The cost record Requirements 33.5, 33.6, and 38.6 oblige is [cost.md](cost.md). It
+carries the stated maximum monthly cost and labels every figure **measured**,
+**derived**, or **estimated** rather than presenting a judgement as a reading. The
+storage footprint and the prompt-cache prefix length are measured against the seeded
+corpus on a local single-node instance; request-unit consumption is recorded as **not
+measured**, because request units are metered by the managed plan and nothing in this
+tree has run against one. The budget the configuration is held to is stated as a
+bound the design was built for rather than a measurement that confirmed it.
 
 ## Architecture diagram
 
@@ -224,10 +277,21 @@ not trust the erasing party is that verification needs no privilege on the erasi
 side — `src/molt/attest/keys.py` lets an auditor verify from a saved public half —
 and that the three operator procedures ship as loadable skills.
 
-The limit is scheduled rather than structural: no erasure run has yet been performed
-against a deployment and no certificate verified from end to end, so for now the
-impact claim rests on component coverage. The full-flow test of task 32.1 is what
-converts it into a claim about a run.
+This is now a claim about a run rather than about component coverage.
+`tests/e2e/test_full_flow.py` seeds a corpus, contaminates it, admits a batch
+through the Collector's signed request path, serves a recall page whose ordering a
+Learned_Procedure's standing decides, answers a threshold grid over the read-only
+role, takes a signed checkpoint, runs a leased erasure, issues a certificate, and
+verifies it with nothing but a public key and a read-only connection — and the
+verification outcome it asserts is the verified one, with the ownership generation,
+the named checkpoint, the first-attribution pair, and the working-rows-deleted
+count each checked against the database.
+
+The limit that remains is the deployment. No erasure has been run against a
+deployed stack, the providers and the object store in that run are stubs, and the
+signature is produced by a key generated in the test process rather than by the key
+service. So the composition is demonstrated and the operated-in-an-account claim is
+not made.
 
 ## Production Readiness
 

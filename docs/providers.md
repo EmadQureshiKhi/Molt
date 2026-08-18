@@ -49,8 +49,14 @@ turns that shared prefix into one paid write and many cheap reads.
 
 ## Region and model identifiers: what is and is not grounded
 
-The repository grounds no deployment region and no concrete model identifier, and
-this document will not invent either.
+The repository grounds no deployment region and no concrete model identifier, and this
+document will not invent either. That is a statement about the *repository*, and it stays
+true: the identifiers the live deployment uses are values in `infra/params/demo.json` and
+in the parameter store, supplied by a deployment rather than defaulted by a module, and
+the README names the three it runs with. Each was verified against its provider before
+being written — the embedding model was checked to answer the 1024 dimensions the schema
+and the index are declared at, and both text models were checked to answer a request —
+which is the opposite of inventing one.
 
 - `MOLT_BEDROCK_REGION` carries no default; `config.example.toml` names the
   placeholder `REPLACE_WITH_DEPLOYMENT_REGION`. Requirement 34.10 constrains the

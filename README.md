@@ -18,7 +18,136 @@
   <img src="https://img.shields.io/badge/database-CockroachDB%20Cloud-111111" alt="CockroachDB Cloud">
   <img src="https://img.shields.io/badge/cloud-AWS-111111" alt="AWS">
   <img src="https://img.shields.io/badge/vector-1024%20dims-111111" alt="1024 dimension vectors">
+  <img src="https://img.shields.io/badge/properties-40%20verified-111111" alt="40 correctness properties">
 </p>
+
+<p align="center">
+  <a href="#live-demo">Live demo</a> &nbsp;·&nbsp;
+  <a href="#architecture">Architecture</a> &nbsp;·&nbsp;
+  <a href="#the-erasure-path">Erasure path</a> &nbsp;·&nbsp;
+  <a href="#semantic-residue-and-the-threshold-decision">Residue</a> &nbsp;·&nbsp;
+  <a href="#what-is-deployed">What is deployed</a> &nbsp;·&nbsp;
+  <a href="#running-it-locally">Run it locally</a> &nbsp;·&nbsp;
+  <a href="docs/architecture.md">Docs</a>
+</p>
+
+---
+
+## Live demo
+
+### **https://trymolt.org**
+
+### Sign in with this credential
+
+```text
+5wfB-xHKhjm8Z77eGhxApox4TB4dMsUi
+```
+
+Paste it into the one field on the sign-in page. There is no user name — the console's
+principal *is* the credential. The sign-in page carries a **?** beside the field that points
+back here, so nobody who lands on the console cold has to guess where the credential lives.
+
+| | |
+|---|---|
+| **Address** | <https://trymolt.org> |
+| **Also reachable at** | <https://uzqusuix2g.execute-api.us-east-1.amazonaws.com> |
+| **Operator credential** | `5wfB-xHKhjm8Z77eGhxApox4TB4dMsUi` |
+| **Ingest and recall endpoint** | <https://wtmkt1aj5k.execute-api.us-east-1.amazonaws.com> — `GET /health` is public |
+| **Sessions expire** | absolutely, and are not extended by use |
+
+This is a working console, not a read-only one. Every page reads the live cluster and the
+erasure path really runs when you start it. That is deliberate: the claim this system makes
+is *provable forgetting*, and a console that only described it would be asking you to take
+the claim on trust.
+
+---
+
+### Demo it end to end in about six minutes
+
+**Steps 1–7 are read-only.** Nothing you click in them can change stored memory — the pages
+run over a database connection holding `SELECT` and nothing else, so it is not that the
+buttons are hidden, it is that the privilege is absent.
+
+| # | Open | What you are looking at | Why it matters |
+|---|---|---|---|
+| 1 | **Fleet** — the landing page | 30 sessions across 4 tenants, read live from a managed CockroachDB cluster | This is real captured agent activity, not fixtures. Filter by tenant: the filter is matched against rows the cluster already returned, so editing the query string cannot widen what you see. One tenant, `quillstone`, shows nothing at all — it has been erased, which is the whole point |
+| 2 | **Memory tiers** | Every tier with its live row count, counted at request time | Four tiers, each with different mutability and different erasure reach. The working tier is the one that is freely overwritten, and it is excluded from every piece of evidence — its row says so |
+| 3 | **Lineage** → click any artifact node | The provenance graph: what derived from what, by which method, bound to which tenant | This is the thing that makes surgical erasure possible. You cannot remove one tenant from a blended artifact unless you know how it was blended |
+| 4 | **Residue** | Cross-tenant contamination found by vector similarity alone | Code with **no identifier on it**, located by a 1024-dimension embedding search over a distributed vector index. This is the leak that an identifier-based delete misses entirely |
+| 5 | **Sensitivity** | A grid of what changes as the two thresholds move | The auto-include and review thresholds are a governance decision, so the consequences are shown rather than buried in a constant |
+| 6 | **Procedures** | What the agent learned, and how each outcome moved its standing | Lowest standing leads, because a procedure near the recall floor is the one worth looking at. Below the floor it is excluded from recall and still held in storage, where erasure reaches it |
+| 7 | **Approvals** and **Retention** | Pending human decisions, and per-tenant retention | The governance surface. Expiry is counted against the cluster's own clock, not the console's |
+
+**Step 8 — run an erasure yourself.** Open **Erasure**, pick a tenant, put your own name as
+requester with a justification, and start it.
+
+- **Leave “dry run” ticked.** A dry run does the entire analysis — takes the lease, detects
+  residue by vector similarity, records a disposition for every artifact it found — and
+  mutates nothing. It finishes in about two minutes and reports what it *would* remove and
+  why, leaving the corpus intact for the next reviewer. The run page lists every disposition.
+- **Leave “skip backup” ticked too.** This cluster tier serves no user-initiated backup,
+  which the capability probe recorded rather than assumed. An unticked run refuses at that
+  phase and says so, rather than erasing without the evidence it promised.
+
+**Step 9 — read a real certificate.** A live run has already been performed, and its
+certificate is served at **Certificates**. Press **Verify** on it. The console re-checks the
+signature and the live queries in front of you and reports each check.
+
+Two halves are being checked, and they answer different questions. The **signature** is
+checked against the payload's canonical digest, so it settles whether the document was
+issued by the deployment's key and has not been altered since. The **live queries** are run
+against the cluster now, so they settle whether the world still matches what the document
+claims. A certificate can be perfectly authentic and still fail its live checks, and if you
+see that, it means exactly what it says: the cluster no longer agrees. Re-seeding the corpus
+for a tenant that was previously erased does that, and a certificate reporting
+`erasure_incomplete` afterwards is the verifier being strict rather than the certificate being
+forged.
+
+Two certificates are stored. The one for **`quillstone`** is the one to verify: it reports
+`verified` with no failed check, and that tenant's corpus has not been touched since its run.
+The earlier one, for `orbanic`, reports `erasure_incomplete` because the corpus was re-seeded
+after that run, so the tenant has rows again. Both are authentic and correctly signed; they
+differ in whether the cluster still matches what each one claims, which is exactly the
+distinction the two halves of verification exist to draw.
+
+<details>
+<summary>What that certificate is, and why a live run is not started from the console</summary>
+
+A live run's surgical redaction rewrites every blended artifact that has to survive without
+the erased tenant's content, and each rewrite is a model call. A corpus this size needs
+hundreds, which is longer than the fifteen minutes a function is allowed to live. So a live
+run is performed as the console's execution role from somewhere with no request timeout.
+
+Signing a certificate and writing it to the evidence bucket are granted to that role alone,
+so it is the only principal a run can be performed as. Its trust policy admits a principal of
+this account alongside the function, and that is not a second signing principal: an operator
+assuming the role *is* the role, so the claim that exactly one role may sign is unchanged. It
+is the same account boundary the key policy and the bucket policy already draw.
+
+The most recent live run **removed 874 rows and retained 366**, and purged 24 working-tier
+rows. Its
+certificate is signed under `ECDSA_SHA_256` by the deployment's key; the signed document is a
+row in the cluster and the object is in the evidence bucket under Object Lock, held for a
+retention period the bucket refuses to shorten for any principal including the account root.
+
+It was then checked the way an auditor with no account here would check it — the document and
+the public half of the key as two files, signature verified locally with **no call to the key
+service**, over a connection holding the read-only role. Every check passed, none failed.
+
+The one piece still unbuilt is a task-hosted runner, and the deployment is already shaped for
+it: the cluster exists, the image carries the erasure verb, and the task role would be this
+same console role — which is why nothing about who may sign changes when it is added.
+</details>
+
+**If you would rather drive it from a terminal**, [`docs/demo.md`](docs/demo.md) is the
+recorded walkthrough, including the paths that need a credential. The ingest and recall
+routes require the bearer value the deployment holds in its parameter store, and ingest
+requires a request signature as well, so neither is published — the console is the
+demonstration.
+
+---
+
+## One system of record
 
 A managed CockroachDB cluster is the single system of record: every agent session,
 derived artifact, provenance edge, embedding, and piece of erasure evidence is a
@@ -26,10 +155,23 @@ relational row in one cluster. Nothing important lives on an engineer's machine,
 governance claim is made that cannot be re-derived from the cluster by someone who does
 not trust the people running it.
 
-The headline capability is **provable forgetting**.
+> **The headline capability is provable forgetting.**
+> Erase one client, including pasted code that carries no identifier, and hand a hostile
+> reviewer a signed certificate whose own SQL they can run against the live cluster.
+
+|  |  |
+|---|---|
+| **Problem** | Shared agent memory becomes a shadow copy of every client's source, blended across engagements |
+| **Hard part** | Residue with no identifier, findable only by vector similarity, and derived artifacts that must lose one client and stay valid for the rest |
+| **Answer** | A fenced, three phase erasure that writes evidence before, during, and after mutation, then signs it with a key held outside the cluster |
+| **Proof** | 40 correctness properties, a ten process fencing demonstration, and verification SQL a third party runs themselves |
+
+---
 
 ## Contents
 
+- [Live demo](#live-demo)
+- [One system of record](#one-system-of-record)
 - [Why this exists](#why-this-exists)
 - [Architecture](#architecture)
 - [The write path](#the-write-path)
@@ -41,6 +183,7 @@ The headline capability is **provable forgetting**.
 - [Six memory tiers](#six-memory-tiers)
 - [Trust boundaries](#trust-boundaries)
 - [Deployment topology](#deployment-topology)
+- [What is deployed](#what-is-deployed)
 - [CockroachDB: what each capability is used for](#cockroachdb-what-each-capability-is-used-for)
 - [AWS: what each service is used for](#aws-what-each-service-is-used-for)
 - [Model providers](#model-providers)
@@ -223,13 +366,25 @@ tier. Beside the tables are the relationships that carry the guarantees, the for
 deliberately absent, and what the four database roles
 enforce.](assets/molt-data-model.svg)
 
-Twenty nine tables, fifteen migrations, two generations. The first generation, `001`
+Twenty nine tables, twenty two migrations, two generations. The first generation, `001`
 through `007`, lays down the core ledger, derived artifacts and lineage, embeddings and
 the vector index, erasure evidence, policy, row-level expiry, and roles. The second,
 `008` onward, adds bitemporal attribution, erasure leases and fencing, signed checkpoints,
 the working tier, confidence-weighted procedural memory, structural protection of the
 audit record, the grants those tables need, and the structural diff summary a surgical
-redaction records on its disposition row.
+redaction records on its disposition row. All twenty nine tables come from `001` through
+`005` and `009` through `012`; every other file amends privileges, constraints, or
+referential actions rather than adding a table.
+
+The files from `016` onward close defects that running the system as its own narrow roles
+exposed: the `SELECT` grants the read-only role and the console's views need, three
+references that stood between an authorised erasure and the rows it was authorised to
+remove, the capability write the watcher's start-up probe performs, the procedural reads
+the disposition phase weighs a learned procedure by, the `DELETE` on `session` the erasure
+sweep finishes with, the two table reads without which the watcher's change stream is
+refused, and the delete on three tables a cascade reaches. Each of those is invisible under
+an administrative login and becomes load-bearing only where the path connects as the role its
+privileges were written for.
 
 A correction to an applied migration is always a new numbered file, never an edit, because
 the runner records a digest per file and refuses to run when a recorded digest no longer
@@ -305,6 +460,60 @@ and models. The cluster and the model providers sit outside the account, and the
 deliberately absent resources are listed with the reason for
 each.](assets/molt-deployment.svg)
 
+## What is deployed
+
+Everything below is running rather than defined. `infra/deploy.sh` created the stacks from
+the templates in this repository and the values in `infra/params/demo.json`, and each claim
+here was verified against the live account and the live cluster rather than read off a
+template.
+
+### Addresses
+
+| | |
+|---|---|
+| **Console** | <https://trymolt.org>, also <https://uzqusuix2g.execute-api.us-east-1.amazonaws.com> — the operator credential is required |
+| **Ingest and recall** | <https://wtmkt1aj5k.execute-api.us-east-1.amazonaws.com> — `GET /health` is open, the rest is authenticated |
+
+### The cluster
+
+| | |
+|---|---|
+| Provider | CockroachDB Cloud, Basic plan, on AWS |
+| Cluster | `molt-memory`, `us-east-1`, id `97092d86-bbb6-4b44-8c7b-4fd784a82419` |
+| Database | `molt` — 29 tables, 22 migrations applied in order |
+| Roles | four least-privilege logins: writer, eraser, reader, watcher, each with a service account of its own and a connection string held only in the parameter store |
+| Vector index | created, `vector_l2_ops`, 1024 dimensions |
+| Change stream | rangefeeds enabled, and the sinkless changefeed over `ledger` and `derived_artifact` **is** served: the policy watcher consumes from it and the capability table records it available. The timestamp-poll fallback remains for a tier that refuses the statement |
+| Corpus | 4 tenants, 30 sessions, 2567 ledger rows, 642 embeddings, 7 derived artifacts, 66 working-tier rows. One of the four, `quillstone`, holds none: it was erased, which is why the totals are smaller than the seeder wrote |
+| Erasure evidence | 13 runs recorded, 4 completed; two signed certificates stored under Object Lock, and the most recent verifies against the live cluster |
+
+### The account
+
+| | |
+|---|---|
+| Account | `542489917358`, region `us-east-1` |
+| Deployed stacks | eleven: `network`, `parameters`, `roles`, `kms`, `storage`, `collector`, `console`, `gateway`, `watcher`, `mcp`, `observability` |
+| Not deployed | `cdn` — creating a content distribution requires a provider-verified account, and the `gateway` stack makes the deployment publicly reachable without one |
+| Functions | `molt-collector` and `molt-console`, Python 3.12 on arm64, each under its own execution role |
+| Task services | `molt-watcher` running one task; `molt-mcp` at zero by design, because its transport reads a peer on standard input and belongs to a server an agent spawns beside itself |
+| Container image | built from the `Dockerfile` in this repository, pushed to ECR, and named by digest rather than by tag so a later push cannot change what a running task is |
+| Secrets | ten `SecureString` parameters: four role connection strings, two provider credentials, the ingest bearer, the ingest signing secret, the console credential record, and the console session key. Three further parameters hold non-secret settings as plain strings |
+| Signing | one asymmetric key; the signing operation is granted to exactly one role in the whole deployment, counted across every identity policy of every stack, and denied to every other principal including the administrative path |
+| Evidence storage | an Object Lock bucket, `molt-certificates-542489917358-us-east-1-v3`, versioned and in compliance mode so a retention period cannot be shortened by any principal including the account root |
+
+### Model providers
+
+| | |
+|---|---|
+| Embedding | Voyage `voyage-code-3`, a code-specialised retrieval model, verified to answer the 1024 dimensions the schema and the index are declared at |
+| Adjudication | Anthropic `claude-sonnet-4-6` |
+| Rewriting | Anthropic `claude-haiku-4-5` |
+
+Each identifier was checked against the provider before it was written into the
+deployment, and the abstraction that made the substitution possible is the reason the
+documented default provider is absent here without a source change: selecting a provider
+is one configuration value, and no module changes with it.
+
 ## CockroachDB: what each capability is used for
 
 | Capability | What Molt does with it | Where |
@@ -378,16 +587,17 @@ caching.
 
 ## Demonstration
 
-> **Placeholder.** The deployment is pending, so the URL and the recording below are not
-> yet published. Everything in this section describes the walkthrough the console is built
-> to serve, and each step is reachable in read-only demonstration mode with no credential.
+The deployment is live. The address, the operator credential, and a step-by-step walkthrough
+are in [live demo](#live-demo) at the top of this file; the shot list and the exact command
+behind each beat are in [`docs/demo.md`](docs/demo.md), and the monthly cost of the
+configuration is in [`docs/cost.md`](docs/cost.md).
 
 | Item | Where |
 |---|---|
-| Live console | `<DEMO_URL>` — the CloudFront generated hostname |
-| Recorded walkthrough | `<VIDEO_URL>` |
-| A signed certificate to read without deploying anything | `<CERTIFICATE_PATH>` |
-| Auditor access | `<MANAGED_MCP_ENDPOINT>` with a per-client read-only service account, following [`docs/auditor.md`](docs/auditor.md) |
+| Live console | <https://trymolt.org> — sign in with the credential in [live demo](#live-demo) |
+| Ingest and recall | <https://wtmkt1aj5k.execute-api.us-east-1.amazonaws.com> — `GET /health` is public |
+| A signed certificate to read | the **Certificates** view, with a **Verify** control that re-checks the signature and the live queries in front of you |
+| Auditor access | a per-client read-only service account, following [`docs/auditor.md`](docs/auditor.md). The tool-server stack is deployed at zero tasks by design, because its transport reads a peer on standard input and belongs to a server an agent spawns beside itself |
 
 The walkthrough, in the order a reviewer should see it:
 
@@ -460,19 +670,27 @@ The `molt` argument tree covers every operator workflow, with exit codes separat
 operational failure, usage error, and a verification outcome of failed:
 
 ```text
-molt seed                     # multi-client seed data, including planted contamination
-molt recall --query "..."     # the query an agent makes before acting
-molt residue --client acme    # residue search in read-only mode, mutating nothing
-molt sensitivity              # the threshold grid, under the reader role
-molt erase --client acme      # a leased run, with a dry-run mode
-molt attest verify <path>     # signature, embedded SQL, chain, and checkpoint
-molt verify-chain --session …  # recompute every digest for one session
-molt contend                  # the lease contention demonstration
-molt watch                    # the policy watcher, with a single-batch mode
-molt serve                    # the console
-molt mcp                      # the read-only tool server
-molt retention                # the retention report
+molt seed --seed 7                        # multi-client seed data, including planted contamination
+molt recall "..."                         # the query an agent makes before acting, as a positional
+molt residue --client acme                # residue search in read-only mode, mutating nothing
+molt sensitivity --client acme            # the threshold grid, under the reader role
+molt erase --client acme \
+  --requester <id> --justification "..."  # a leased run, with a dry-run mode
+molt attest verify --certificate <path>   # signature, embedded SQL, chain, and checkpoint
+molt verify-chain --session-id <uuid>     # recompute every digest for one session
+molt contend --client acme                # the lease contention demonstration
+molt watch                                # the policy watcher, with a single-batch mode
+molt serve                                # the console
+molt mcp                                  # the read-only tool server
+molt retention                            # the retention report
 ```
+
+Three of those flag sets are worth stating explicitly, because a plausible-looking
+invocation is refused. `recall` takes its query as a positional argument and declares no
+`--query` flag. `attest verify` takes no positional path: it names exactly one of
+`--certificate`, `--s3-key`, or `--checkpoint`, and naming none or more than one is a
+usage error. `--client` is required on `residue`, `sensitivity`, `erase`, and `contend`,
+and `--seed` is required on `seed`.
 
 ## Verification
 
@@ -547,7 +765,7 @@ skills/        three agent skills in the open format
 infra/         ten templates, parameters, deploy and teardown wrappers
 scripts/       provisioning, local database, capability probes, the hygiene gate
 web/           templates and static assets for the console
-assets/        the logo and the four rendered diagrams
+assets/        the logo and the nine rendered diagrams, each as an SVG and a PNG
 docs/          the documentation set below
 ```
 
@@ -589,14 +807,68 @@ independent verification. Checkpoint computation, signing, and verification with
 and unaccounted disagreement. The policy watcher, its changefeed consumption and polling
 fallback, the kill switch, and the approval queue. The retention manager. Molt's own MCP
 server and the three shipped skills. The seed generator. The console and the command-line
-interface. The provisioning scripts with their capability probes, the ten infrastructure
+interface. The provisioning scripts with their capability probes, the twelve infrastructure
 templates with their deployment wrappers, the machine-readable interface specification,
 and the documentation set.
 
-**In flight.** Deployment of the stacks and the first end-to-end signed certificate
-produced against the live cluster, telemetry integration across the remaining components,
-and the last of the end-to-end and service-credential test coverage. Until those land,
-read the demonstration section as the walkthrough the console is built to serve rather than
-as a published URL.
+**Verified end to end.** `tests/e2e/test_full_flow.py` runs the whole sequence against a
+live cluster in one history: seed, capture through a signed ingest request, a recall page
+whose ordering a Learned_Procedure's standing decides, a threshold grid answered over the
+read-only role, a signed checkpoint, a leased Erasure_Run, certificate issue, and
+independent verification. The verification outcome it asserts is `verified`, and the
+certificate's ownership generation, named checkpoint, first-attribution pair, and
+working-rows-deleted count are each checked against the row the cluster holds. Its counts
+are confirmed through the derived mechanism, so agreement does not depend on the
+garbage-collection horizon.
+
+That run is also what found the defects worth naming, because component coverage could not:
+the read-only role was missing `SELECT` on two tables every read-only component needs, the
+disposition table classified a tenant's own Sessions as having no claim on themselves, the
+chain check reported an authorised deletion as a mismatch, and three foreign keys made the
+memory graph undeletable. All four are fixed, in migrations `016` and `017` and in the
+disposition and verification paths.
+
+**Deployed and exercised.** Eleven of twelve stacks are running in a live account against
+a managed CockroachDB cluster, and [what is deployed](#what-is-deployed) states each fact
+with the value it was verified at. The console is publicly reachable behind the published
+operator credential; the ingest path accepts a signed batch and refuses the same body
+unsigned; the recall path answers ranked neighbours from the distributed vector index; a
+governed erasure has run to completion and produced a signed certificate that verifies; and
+the policy watcher consumes from the sinkless change stream.
+
+That last one was documented here as the opposite for a while, and how it was wrong is worth
+keeping. The watcher reported the stream unavailable and ran its timestamp-poll fallback, so
+this file concluded the cluster's plan did not serve one. The cluster served it the whole
+time. `Watcher.from_configuration` defaulted its stream opener to nothing, a watcher with no
+opener refuses its own stream *before* the cluster is asked, and that refusal was caught by
+the same handler that catches a refusal from the cluster and reported through the same three
+channels — a capability row, a metric, a log record — under a fixed sentence blaming the
+cluster. Every signal was healthy and every one of them was wrong about the cause.
+
+Deploying is also what found the last round of defects, and they were not the kind a test
+suite finds by being run again. Every console page answered *not implemented*, because the
+view package that attaches eighteen written handlers was imported by nothing — and the
+suites passed, because they import those modules directly, so the tests and the application
+disagreed about what was running and only the tests were consulted. The deployed ingest
+function served recall with no engine attached. Every role's connection string required full
+certificate verification and named no authority to verify against, which is not a stricter
+check but no connection at all. A task execution role granted four registry operations and
+two log operations in one statement whose single resource was the log group, so no task
+could pull its own image. Each is fixed, each has a gate that fails on its recurrence, and
+each is written up in [`docs/reviews.md`](docs/reviews.md).
+
+**Not yet done.** Two things, neither of them a capability.
+
+The content distribution. Creating one requires a provider-verified account, which is a
+support request rather than work. Nothing waits on it, because the regional endpoints serve
+the same traffic and the distribution would take one of them as its origin rather than
+replacing it. The console is reached at <https://trymolt.org> without it.
+
+A task-hosted erasure runner. A live run's surgical redaction is one model call per blended
+artifact and does not fit inside the time a function is allowed to live, so a live run is
+performed as the console's execution role from a host with no request timeout. The deployment
+is already shaped for the runner: the cluster exists, the image carries the erasure verb, and
+the task role would be this same console role, which is why nothing about who may sign
+changes when it is added. A dry run finishes from the console as it is.
 
 Licensed under the MIT terms recorded in [`LICENSE`](LICENSE).

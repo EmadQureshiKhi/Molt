@@ -2,12 +2,13 @@
 
 You have read-only access to one tenant's slice of the memory cluster, reached from
 your own editor through the database platform's managed MCP endpoint. You can read
-three views: the event ledger, the erasure runs, and the attribution history, each
-filtered to the single departing Client you act for. You can ask questions in
-natural language, and the editor turns them into `SELECT` statements the account
-runs. You cannot write, cannot read a base table, cannot see another Client's rows,
-and cannot keep the access — the account stops being valid on its own after at most
-30 days. Every statement you run is logged against your account.
+four views: the event ledger, the erasure runs, the attribution history, and the
+as-of attribution read over that history, each filtered to the single departing
+Client you act for. You can ask questions in natural language, and the editor turns
+them into `SELECT` statements the account runs. You cannot write, cannot read a base
+table, cannot see another Client's rows, and cannot keep the access — the database
+login stops being valid on its own after at most 30 days. The statements you run are
+recorded in the cluster's own audit log against the account that ran them.
 
 That is the whole shape of it. The rest of this document is how to connect, what the
 views hold, what is deliberately outside them, and why the access is cut this way.
@@ -29,7 +30,7 @@ its own row in [threat-model.md](threat-model.md#trust-boundaries-of-the-deliver
 | `<AUDITOR_ACCOUNT>` | Your account identifier, of the form `auditor_` followed by the slug the provisioning run was given | The `--auditor <slug>:<client-slug>` argument of the provisioning run for this engagement |
 | `<CREDENTIAL_PARAMETER>` | The parameter path the connection credential was written to, of the form `<prefix>/auditor/<slug>/dsn` | The `--prefix` argument of the same provisioning run. The operator reads the value out of band and hands it to you through their own channel |
 
-Two of those are the template's parameters (Requirements 24.1, 24.7). The third is a
+Two of those are the template's parameters (Requirements 24.1, 24.4). The third is a
 path, not a value: it names *where* the credential lives so an operator can find it
 without either of you pasting it anywhere.
 
@@ -52,7 +53,7 @@ flowchart TB
     ed["Your editor<br/>Claude Code, Cursor, or Visual Studio Code"]
     mcp["Managed MCP Server<br/>the platform's own endpoint"]
     acct["Your database login<br/>SELECT only, expiring, no role membership"]
-    views["Per-Client views in your own schema<br/>ledger, erasure_run, client_binding"]
+    views["Per-Client views in your own schema<br/>ledger, erasure_run, client_binding, attribution_as_of"]
     rows["Rows bound to one Client"]
 
     ed -->|"a question, rendered into one SELECT"| mcp
@@ -73,9 +74,10 @@ further; nothing you add widens it.
 ## The views you can read
 
 The provisioning script creates a schema named after your account, grants your
-account `USAGE` on that schema, defines three views over it, and grants `SELECT` on
+account `USAGE` on that schema, defines four views over it, and grants `SELECT` on
 each view. It grants nothing on any base table and adds your account to no service
-role, which is why the base tables are unreadable rather than merely discouraged
+role: the `SELECT` privilege is granted directly to your own login rather than
+through a shared reader role, so your reach is narrower than any service role's
 (Requirements 24.2, 24.5).
 
 | View | Filtered by | What it answers |
@@ -83,28 +85,44 @@ role, which is why the base tables are unreadable rather than merely discouraged
 | `<AUDITOR_ACCOUNT>.ledger` | `client_id` in the one Client | Every recorded event attributed to your Client: session, sequence, category, the two instants, the agent tool and machine that produced it, the payload, whether it was redacted, the content and chain digests, and the expiry the row carries |
 | `<AUDITOR_ACCOUNT>.erasure_run` | `client_id` in the one Client | Every erasure run for your Client: status, phase, the before and after instants, the two residue thresholds the run used, whether a backup was taken or skipped, the count of artifacts that were not embedded, and the start and finish |
 | `<AUDITOR_ACCOUNT>.client_binding` | `client_id` in the one Client | The attribution history: one immutable row per version, carrying the artifact, its kind, the detection method, the confidence, the detection instant, the validity start, the validity end while closed, and the version that superseded it |
+| `<AUDITOR_ACCOUNT>.attribution_as_of` | `client_id` in the one Client | The as-of attribution read, named as its own view. A narrower projection of the same history — `id`, `artifact_id`, `client_id`, `method`, `confidence`, `valid_from`, `valid_to`, `superseded_by` — chosen to match the index that serves the read. The artifact kind is deliberately absent; the `client_binding` view beside it carries that |
 
 ### The as-of-attribution read
 
 The question an Auditor usually opens with is *when did you first attribute this
 artifact to my Client, and what has changed since.* Requirement 43.11 obliges the
 `Auditor_Gateway` to expose the as-of-attribution query of Requirement 43.4 through
-this view set, and the `client_binding` view is where it lands: the view projects
-every column of the attribution history, including the validity interval and the
-superseding reference, so the as-of predicate is a `WHERE` clause you add.
+this view set, and `attribution_as_of` is where it lands: a fourth view in your own
+schema, filtered to your Client the same way the other three are, projecting
+`id`, `artifact_id`, `client_id`, `method`, `confidence`, `valid_from`, `valid_to`,
+and `superseded_by`. That projection is the key and stored columns of the index built
+to serve this read, so the read stays a range scan over one artifact's versions.
+
+**The view binds no instant.** A view takes no parameter, so the as-of instant cannot
+live inside it. What the view gives you is the read under its own name with the
+validity-interval columns exposed; the interval predicate is a `WHERE` clause you
+write, and the instant stays yours. Read Requirement 43.11 as satisfied in substance
+rather than literally: the as-of read is a named member of the view set instead of an
+incidental consequence of another view happening to project the right columns, and
+the caller-supplied instant of Requirement 43.4 stays caller-supplied.
 
 The interval is half-open — inclusive at the start, exclusive at the end — so the
 instant a supersession happened belongs to the successor alone and no instant
-returns two versions for one Client:
+returns two versions for one Client. The containment predicate is
+`valid_from <= the instant AND (valid_to IS NULL OR valid_to > the instant)`, which
+copies out as:
 
 ```sql
-SELECT id, client_id, method, confidence, valid_from, valid_to
-FROM <AUDITOR_ACCOUNT>.client_binding
+SELECT id, artifact_id, client_id, method, confidence, valid_from, valid_to
+FROM <AUDITOR_ACCOUNT>.attribution_as_of
 WHERE artifact_id = '<ARTIFACT_ID>'
   AND valid_from <= '<INSTANT>'
   AND (valid_to IS NULL OR valid_to > '<INSTANT>')
 ORDER BY client_id;
 ```
+
+If you want the artifact kind alongside the answer, ask the same predicate of
+`client_binding`, which projects every column of the history.
 
 A null validity end reads as *and it still holds*. A version whose interval is empty
 — both ends the same instant — is a withdrawal marker: it records that a claim was
@@ -112,11 +130,15 @@ removed rather than that it never existed, and it is returned by no as-of read a
 instant. That asymmetry is the point of storing attribution as a version history
 instead of a row that gets overwritten.
 
-Stated plainly before you rely on it: the provisioning script creates no separate view
-named for the as-of query. It creates the three above, and the as-of answer is a
-predicate over the third. Your own Client's claims are what that view holds, so *what
-has changed since* is answerable within your tenancy and says nothing about any other
-Client's history.
+Stated plainly before you rely on it: the provisioning script does create a separate
+view for the as-of read, and it is the fourth one above. What it does not do is bind
+the instant — that stays a predicate you supply. Your own Client's claims are all the
+view holds, so *what has changed since* is answerable within your tenancy and says
+nothing about any other Client's history.
+
+Nothing in this document has been run against a provisioned cluster, so treat the
+view set as what the provisioning script defines rather than as something observed in
+place.
 
 ### Three queries to start with
 
@@ -240,12 +262,32 @@ an answer.
 
 ## Every query you run is recorded
 
-Your statements are logged. Each one becomes a structured record naming the service
-account that ran it, a digest of the statement, and the number of rows it returned
-(Requirement 24.6). The records are pulled from the cluster's own audit log for an
-operator-supplied window through the control-plane tool, by
-`scripts/pull_audit_log.sh` (Requirement 27.8) — a read-only pull that creates
-nothing and changes nothing.
+Your statements are recorded by the cluster, and the cluster's own audit log is the
+only place they can be recorded. You connect straight to the managed endpoint, so no
+Molt component sits in that request path: nothing of ours observes your statement or
+counts the rows it returned at query time. Requirement 24.6 asks for a structured
+record naming the service account, the statement digest, and the row count returned,
+and it names Telemetry as the recorder — but Telemetry cannot see a request it is not
+part of, so the delivered mechanism is the audit log rather than our own logging.
+
+The mechanism that retrieves those records is `scripts/pull_audit_log.sh`
+(Requirement 27.8), which asks the control-plane tool for the cluster's audit records
+over a window whose two bounds the caller supplies, and writes them as JSON to a
+destination file with owner-only permissions or to standard output. It is a read-only
+pull that creates nothing and changes nothing, and two runs over one window fetch the
+same records.
+
+Be precise about what the pull delivers, because it is less than the requirement
+describes. The script selects no fields and filters nothing beyond the window: it
+hands back whatever records the control plane returns. So of the three fields
+Requirement 24.6 names, none is produced by the pull itself. The script's own
+description says an audit record names principals and statements, which is why it
+protects its output file — so an account identifier and a statement are expected to
+be present in the records, though the pull does not project them and nobody has run
+it here to confirm the shape. **A per-statement row count is unconfirmed**: nothing in
+the pull produces one, and no field of it has been observed. If a row count matters to
+your review, ask the operator to show you a record rather than taking this document's
+word for it.
 
 This is stated up front rather than buried, for two reasons. It is symmetric: you are
 auditing a system that records what its own operators do, and the same mechanism
@@ -253,8 +295,9 @@ records what you do. And it is a protection for you — a logged read set is evi
 that your review stayed inside its scope, which is worth more to you than
 unobserved access would be.
 
-The digest is of the statement, not of the rows. What you read is recorded as a
-count; the content you saw is not copied into the log.
+Where a digest of the statement appears, it is a digest of the statement and not of
+the rows: an audit record is a record of what was asked, and the content you saw is
+not copied into it.
 
 ## What you cannot see, and why that is not evasion
 
@@ -318,23 +361,38 @@ describes. It reads only — no stage writes a row, and the database role it use
 holds `SELECT` alone.
 
 The skill runs the certificate verification, then calls the lineage ancestor and
-descendant tools for each Artifact identifier you name, so a surviving derived
-descendant of erased material is reported rather than assumed absent. It emits one
-JSON object per stage and returns the verification path's own exit status, so a
-failed outcome is a non-zero status rather than a line of prose.
+descendant tools for each Artifact identifier you name — at least one is required —
+so a surviving derived descendant of erased material is reported rather than assumed
+absent. Standard output carries one JSON object per line and narration goes to
+standard error, and the script ends with the verification path's own status, so a
+failed outcome is a non-zero status rather than a line of prose. The four statuses
+are: zero for a verified outcome, three for a failed one, two for a usage or
+configuration error, and one for an operational failure. Three is separate from one on
+purpose — a verification that ran and concluded `failed` is a successful verification
+with a negative answer, and it must not share a status with a cluster you could not
+reach.
 
 The same checks are reachable from the interface directly:
 
 ```text
 molt attest verify --certificate <PATH> --json
 molt attest verify --s3-key <KEY> --bucket <NAME> --json
-molt attest verify --certificate <PATH> --checkpoint <UUID> --json
-molt attest verify --certificate <PATH> --skip-live-queries --json
+molt attest verify --checkpoint <UUID> --json
 molt verify-chain --session-id <UUID> --json
 ```
 
-`--skip-live-queries` is the offline mode: canonical round trip and signature only,
-no cluster. It is the check to run first, because it needs no access at all.
+Name exactly one of `--certificate`, `--s3-key`, and `--checkpoint`. Naming two is
+refused as a usage error before anything is read, so the checkpoint form verifies a
+named checkpoint on its own rather than adding a checkpoint to a certificate run — a
+certificate that names a checkpoint has that checkpoint verified as part of the
+certificate run anyway.
+
+The verb also accepts a `--skip-live-queries` flag, and you should know that **the
+flag is declared on the command surface and no code reads it**: verification opens its
+read-only connection either way. The offline check the flag was meant to name — the
+canonical round trip and the signature, which need no cluster at all — is what the
+verification path performs first, but there is at present no invocation that stops
+after it. Ask the operator before relying on an offline run.
 
 ### The signature, offline
 
@@ -347,10 +405,12 @@ influence the answer by controlling the service. The algorithm the delivered
 configuration supports is `ECDSA_SHA_256` over the P-256 curve, named on the
 certificate alongside the key identifier.
 
-The signature check fails in two distinguishable ways. A payload whose
-canonical re-serialisation digests differently fails as `payload_digest` — the
-document was edited. A payload that digests correctly but whose signature does not
-verify fails as `signature_value` — the document was not signed by that key.
+The signature check fails in two distinguishable ways, and both are reported under
+the one check name `signature_invalid` with the subject saying which. A payload
+whose canonical re-serialisation digests differently names the subject
+`payload_digest` — the document was edited. A payload that digests correctly but
+whose signature does not verify names the subject `signature_value` — the document
+was not signed by that key.
 
 ### The session hash chain
 
@@ -410,7 +470,9 @@ not a tamper finding.
 The verification report carries a machine-readable `outcome` and a list of failed
 checks. The outcome is `verified` only when every check passed, and `failed` when
 any check did not; there is no partial verdict, and the exit status is derived from
-the outcome so a script does not have to parse prose. Each failed check names the
+the outcome so a script does not have to parse prose. Every check runs regardless of
+an earlier failure, so one report shows you the whole picture rather than the first
+thing that went wrong. Each failed check names the
 check, the subject it concerns, and the identifiers involved, and the report also
 lists the distinct failed check names so a summary line is available without
 walking the whole list.
@@ -419,33 +481,41 @@ The checks that can appear, and what each one tells you:
 
 | Failed check | What it says |
 | --- | --- |
-| `payload_digest` | The canonical payload does not digest to the recorded value — the document was altered after signing |
-| `signature_invalid` | The signature does not verify against the public key for the recorded digest |
+| `signature_invalid` | The document does not verify. Under the subject `payload_digest` the canonical payload no longer digests to the recorded value — it was altered after signing; under the subject `signature_value` the digest is right but the signature is not that key's |
 | `erasure_incomplete` | A `Disposition` claims removal that the live state contradicts |
 | `artifact_still_present` | An Artifact recorded as hard-deleted is still stored, or a Session recorded as hard-deleted still holds Events |
 | `redaction_digest_mismatch` | A surgically redacted Artifact's current digest differs from the post-digest the certificate recorded |
 | `count_disagreement` | A re-executed before or after count differs from the count the certificate states |
-| `query_template_unknown` | The certificate carries a `Verification_Query` under a template name the verifier does not recognise |
+| `query_template_unknown` | An embedded `Verification_Query` is not the template it names: an unrecognised name, text that does not match the template's documented form, the wrong number of parameters, or a declared expectation other than the template's own. The last is a failure rather than a note on purpose — a laxer expectation declared beside a query is the lever an issuer would reach for to make the completeness check pass |
+| `verification_query_missing` | A `Verification_Query` the fixed template registry declares obligatory is absent from the certificate, so that completeness check was never made. The subject is the name of the missing query. It exists because a certificate carrying no queries at all would otherwise report `verified` with the central claim untested |
 | `chain_mismatch` | A Session's chain no longer recomputes from its stored rows |
-| `chain_tip_mismatch` | A Session's terminal digest differs from the tip the certificate recorded |
+| `chain_tip_mismatch` | A surviving Session's terminal digest differs from the tip the certificate recorded, or the certificate recorded no tip for that Session at all. The recorded tip is nullable, and a document naming none has committed to nothing about that Session's Events, so absence fails here rather than passing quietly; a note beside it says which of the two it was |
 | `checkpoint_absent` | The named checkpoint cannot be found |
 | `checkpoint_signature_invalid` | The named checkpoint's own signature does not verify |
 | `checkpoint_unexplained_change` | A covered Session's terminal digest moved with no recorded `Erasure_Run` accounting for it |
 
-Notes are separate from failures and do not change the outcome. Four you will meet:
-`historical_corroboration` records whether a point-in-time read was
-attempted, whether both instants fell inside the horizon, and whether it agreed;
-`recorded_count_derivation` names the mechanism the stated counts were derived from,
-which is the Ledger and the Dispositions;
+Notes are separate from failures and do not change the outcome. Six exist, and five of
+them you may meet on any report: `historical_corroboration` records whether a
+point-in-time read was attempted, whether both instants fell inside the horizon, and
+whether it agreed; `recorded_count_derivation` names the mechanism the stated counts
+were derived from, which is the Ledger and the Dispositions;
 `checkpoint_disagreement_explained` names the Sessions whose movement a recorded run
-accounts for; and `session_deleted_by_this_run` names a Session that holds no rows
-because this run removed them, which the dispositions in the same document record.
+accounts for; `session_deleted_by_this_run` names a Session that holds no rows because
+this run removed them, which the dispositions in the same document record; and
+`session_tip_not_recorded` names a surviving Session the certificate carried no
+terminal digest for — it travels beside a `chain_tip_mismatch` failure for that
+Session and tells you the tip was absent rather than different. The sixth,
+`checkpoint_is_not_the_latest_before_run`, is described with the checkpoint above.
 
-A corroboration that was not attempted is not a failure. The three reasons it may
-be skipped — `outside_gc_horizon`, `gc_horizon_unprobed`, and
-`historical_read_refused` — are all recorded, and the certificate's own first two
-caveats are why: the derived figures are the evidence, and the historical read is a
-convenience that is only sometimes available.
+A corroboration that was not attempted is not a failure. Four reasons it may be
+skipped are recorded: `outside_gc_horizon`, `gc_horizon_unprobed`,
+`historical_read_refused`, and `run_records_no_after_instant`. The last of those is a
+run that recorded no after-instant, which is what an unfinished run looks like — the
+after-instant is nullable, so there is no second moment to read a count at and nothing
+was withheld. The certificate's own first two caveats are why none of the four fails:
+the derived figures are the evidence, and they need neither instant, so both counts
+are still compared and a certificate for an unfinished run reports rather than
+raising.
 
 ### The verification queries
 
@@ -453,9 +523,14 @@ The certificate embeds SQL for a third party to run, so verification does not
 require trusting our verifier. Two templates carry the central claim — that no
 current attribution to your Client remains, and that no Session of your Client
 remains — and every template targets the durable tiers only, never the `working`
-tier. The row counts each query returned are reported. You can run them yourself
-against the views you hold, and if a template's result and the report disagree, the
-cluster is the fact.
+tier. The row counts each query returned are reported, and the report also states
+whether each query's expectation — an empty result — was satisfied.
+
+One of the two you can re-run yourself and one you cannot. The attribution query reads
+the attribution history, which you hold as `client_binding` in your own schema, so the
+same question is yours to ask. The Session query reads the Session table, which is not
+in your view set, so you can read the report of it but not reproduce it. Where a query
+you can re-run disagrees with the report, the cluster is the fact.
 
 ## Why the access is shaped this way
 
@@ -473,12 +548,21 @@ So tenancy is expressed as a view that carries the filter, and the grant is on t
 view. This is why the filter cannot be stepped around by a cleverer query — there is
 no wider relation your account can name.
 
-**The account expires on its own.** An Auditor account is evidence access, not
-standing access, so the provisioning script creates a login with a validity bound of
-at most 30 days (Requirement 24.4) computed when the account is provisioned. Nobody
-has to remember to revoke it, which is the failure mode that leaves review accounts
-alive for years. If your engagement runs longer, ask for a fresh account rather than
-an extension.
+**The database login expires on its own.** An Auditor account is evidence access, not
+standing access, so the provisioning script creates the login with a validity bound of
+at most 30 days (Requirement 24.4), computed at run time from the configured maximum
+interval rather than written into a file. Nobody has to remember to revoke it, which
+is the failure mode that leaves review accounts alive for years. If your engagement
+runs longer, ask for a fresh account rather than an extension.
+
+**There are two accounts per Auditor, not one.** Alongside that expiring database
+login, the same provisioning path creates one control-plane service account named for
+you, through the same code path the four service roles use, and it does so before the
+credential check so a re-run establishes the account even where the connection string
+is already stored. The 30-day bound is carried by the database login's validity
+clause; the script sets no expiry on the control-plane account. Treat this half as
+**unverified**: nothing here has been run against a control plane, so the account's
+creation is what the script specifies rather than something established.
 
 **Append-only underneath.** No role in this system holds `UPDATE` on the ledger, and
 that revocation is written out for every role rather than left implicit. Rows leave
@@ -503,4 +587,5 @@ and cite the query.
 - [skills.md](skills.md) — the shipped Agent_Skills, including the certificate
   verification skill this guide sends you to instead of restating its procedure
 
-Grounded in Requirements 24.1, 24.2, 24.3, 24.4, 24.5, 24.6, 24.7, 27.8, and 43.11.
+Grounded in Requirements 24.1, 24.2, 24.3, 24.4, 24.5, 24.6, 24.7, 27.8, 43.4, and
+43.11.

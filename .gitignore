@@ -49,3 +49,14 @@ diagram/
 
 # Editor and platform noise
 .DS_Store
+
+# The marker that tells a file-syncing client to leave this tree alone. It is a
+# property of one machine's setup rather than of the project.
+.nosync
+
+# Copies a syncing client leaves behind when it resolves a conflict, which it names
+# by appending a number before the extension. They are duplicates of a tracked
+# asset by construction, and one reached the tree unreferenced by anything.
+* [0-9].png
+* [0-9].svg
+* [0-9].json

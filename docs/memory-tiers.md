@@ -239,8 +239,13 @@ What makes the route evidence rather than decoration:
   table's own configuration rather than from a hardcoded value or a configuration
   key. That is what turns "the cluster enforces expiry" into something a viewer
   can watch happen.
-- **The route opens no write transaction.** It connects with the reader role,
-  which holds `SELECT` and nothing else, so the view is available unchanged in
+- **The route opens no write transaction.** The counts are taken inside
+  `BEGIN TRANSACTION READ ONLY`, so a statement that wrote would be refused by the
+  cluster rather than merely absent from the module. The route also reads through
+  `Console.read_only_store()`, which is the reader connection — holding `SELECT`
+  and nothing else — wherever the deployment configures one, and the primary
+  connection where it configures none. The delivered console configures one. Either
+  way the read-only transaction stands, so the view is available unchanged in
   read-only demonstration mode.
 
 ## What the mapping does not name

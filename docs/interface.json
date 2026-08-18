@@ -1068,7 +1068,7 @@
                 "type": "object",
                 "properties": {
                   "csrf_token": { "type": "string" },
-                  "decision": { "type": "string", "enum": ["approve", "reject"] }
+                  "decision": { "type": "string", "enum": ["approved", "denied"] }
                 },
                 "required": ["csrf_token", "decision"]
               }

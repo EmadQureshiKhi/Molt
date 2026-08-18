@@ -52,7 +52,7 @@ Three containment rules make the `working` tier genuinely disposable rather than
 
 - **No certificate field and no Verification_Query reads the `working` tier.** The Certificate_Builder derives every field from `episodic`, `attribution`, `procedural_semantic`, `provenance`, and `action` tables, and every Verification_Query template targets those tables only (Requirements 42.10, 42.11).
 - **Nothing references a working row.** `lineage_edge`, `client_binding`, `disposition`, and `ledger_checkpoint` each carry no reference to `working_memory`, and the `artifact_ref` view does not include it, so a working row cannot become a lineage parent or an erasure candidate (Requirement 42.12).
-- **Erasure deletes working rows for a Client as one aggregate count.** The Erasure_Engine issues a single set-based delete at run start and records the deleted row count on the run row, rather than emitting a Disposition per row, because a Disposition is evidence about content that mattered and a working row is by construction content that did not (Requirement 42.13).
+- **Erasure deletes working rows for a Client as one aggregate count.** The Erasure_Engine issues a single set-based delete and records the deleted row count on the run row, rather than emitting a Disposition per row, because a Disposition is evidence about content that mattered and a working row is by construction content that did not (Requirement 42.13). The delete is the run's *first* mutation of memory content, so it runs after the backup is secured rather than at run start, and it commits in one fenced transaction with the count it produced, so a superseded owner removes no row and records no number (Requirements 19.3, 44.7).
 
 The taxonomy is observable at runtime rather than only documented. The Web_Console serves a Memory_Tier view at `GET /tiers` rendering one row per tier with the tables that tier holds, that tier's mutability, the capability that tier relies on, and that tier's live row count read from the cluster at request time (Requirements 25.15, 42.16). The four descriptive columns of the table above are encoded exactly once, as a module-level immutable mapping in `src/molt/models/tiers.py`; that mapping is the single source, the view reads it, and the generator that produces `docs/memory-tiers.md` reads it as well (Requirement 42.14), so the design table, the rendered view, and the documentation state one taxonomy rather than three copies of one.
 
@@ -315,10 +315,12 @@ sequenceDiagram
     LM-->>EE: granted(owner, generation), or refused(current owner, current generation)
     Note over EE: no lease held aborts before any mutation, reporting the current owner
     EE->>M: T0: INSERT erasure_request, erasure_run(status=running, t_before=now(), generation, idempotency_key)
-    EE->>M: T0b: DELETE working_memory WHERE client_id = $c, record aggregate count
+    EE->>M: T0a: record run ownership on the lease
     EE->>BM: take pre-erasure backup
     BM-->>EE: backup identifier, or failure
-    Note over EE: backup failure aborts before any mutation
+    Note over EE: backup failure records the abort and touches no memory content
+    EE->>M: T0b: DELETE working_memory WHERE client_id = $c and record the aggregate count, one fenced transaction
+    Note over EE: every step from T0a onwards records an abort on failure, so no run row is left running
     loop while the run is in flight
         EE->>LM: renew lease, extending expiry by the lease interval
     end
@@ -579,9 +581,14 @@ class MemoryStore:
 
 `in_serializable` retries on SQLSTATE `40001` at most 5 times with exponential jittered backoff (base 50 ms, cap 2 s), then raises a named error and emits `store.serialization_exhausted` (Requirements 15.4, 15.5). Counter updates are single statements of the form `UPDATE session SET tool_call_count = tool_call_count + $1 ...`, so no increment is lost and no read-modify-write occurs in application code (Requirements 15.6, 36.3, 36.5). No advisory lock, no session-level lock table, and no serialising sentinel row shared across unrelated Sessions is used; the only cross-transaction coupling is the erasure guard read described below (Requirement 15.7).
 
-**Erasure guard read.** Any transaction that writes a Client_Binding first reads `erasure_run` for that Client with status `running` in the same transaction. If a run is in flight, the write is refused with a domain error. If a run starts concurrently, the run's insert or status update conflicts with that read set and SERIALIZABLE aborts exactly one of the two transactions, so a concurrently written Artifact either fails with a serialization error or lands before the sweep and appears in the run's Dispositions (Requirements 15.3, 36.4).
+**Erasure guard read.** Any transaction that writes a Client_Binding first reads `erasure_run` for that Client with status `running` in the same transaction. If a run is in flight, the write is refused with a domain error. If a run starts concurrently, one of two things happens, and the guarantee rests on both arms rather than on an abort:
 
-**Fenced writes.** `fenced` wraps a write body in the SERIALIZABLE retry wrapper and prefixes it with the guarded write predicate of the lease design below. It reads the current Fencing_Generation for the Client in the same transaction as the write and refuses the whole transaction when the presented generation is not current, raising `StaleFencingGeneration` carrying both values and persisting no row (Requirement 44.8). Every Disposition write, every run completion record, and every certificate insert goes through it.
+- The run row commits first. The guard read observes it, and the binding write is refused with the domain error above.
+- The binding write commits first. Its guard read found nothing and its insert touched no key the run's insert touched, so neither transaction is aborted: the two are simply ordered, with the binding write first. The binding is therefore *present* before the run's sweep selects, and the sweep observes it and records its Disposition.
+
+So the outcome a concurrent Artifact meets is a refusal or a Disposition, and never a silent omission. The requirement this rests on is an ordering one rather than a conflict one: the sweep must select strictly after the run row commits, which it does because the run row is inserted in its own committed transaction before the sweep begins. An implementation that selected candidates in the same transaction that inserts the run row would lose this arm, and the abort branch would not save it — there is nothing for SERIALIZABLE to abort when the two transactions touch disjoint keys (Requirements 15.3, 36.4).
+
+**Fenced writes.** `fenced` wraps a write body in the SERIALIZABLE retry wrapper and prefixes it with the guarded write predicate of the lease design below. It reads the current Fencing_Generation for the Client in the same transaction as the write and refuses the whole transaction when the presented generation is not current, raising `StaleFencingGeneration` carrying both values and persisting no row (Requirement 44.8). Every write the run skeleton sends goes through it: the working-tier purge and its count, the backup's record on the run row, the explicit sweep, the residue candidate extension, every Disposition, every phase-marker move, the run completion, the request status, and the certificate insert. Two writes framed by other modules go through it as well: the `backup_record` row and each `residue_candidate` row, both of which demand the tenant and the generation rather than defaulting them.
 
 #### Embedder
 
@@ -726,23 +733,48 @@ The abandoned case is a deliberate non-adjustment rather than an oversight: a Se
 #### Erasure_Engine
 
 ```python
-def run(request: ErasureRequest, *, owner: str, idempotency_key: str,
-        dry_run: bool = False, skip_backup: bool = False,
-        thresholds: Thresholds = DEFAULT_THRESHOLDS,
-        progress: Callable[[PhaseEvent], None] | None = None) -> ErasureRun
+@dataclass(frozen=True)
+class ErasureRequest:                      # what the operator asked for
+    client_id: UUID; requester: str; justification: str; idempotency_key: str
+    dry_run: bool = False; skip_backup: bool = False
+
+@dataclass(frozen=True)
+class EngineSeams:                         # everything outside the cluster, injected
+    configuration: Configuration; backup: BackupSettings
+    capabilities: CapabilityRecord; supersession: SupersessionContext
+    text_provider: TextProvider | None = None
+    embedding_provider: EmbeddingProvider | None = None
+    progress: ProgressCallback | None = None       # Callable[[PhaseProgress], None]
+    owner: str | None = None                       # host and process where unnamed
+    # plus the statement issuer, the command runner, the clock, and the
+    # recorded prompt-cache capability
+
+def run_erasure(store: MemoryStore, request: ErasureRequest,
+                seams: EngineSeams) -> RunOutcome
 ```
 
-Phases, transaction boundaries, and retry behaviour are specified in the erasure algorithm section. `progress` is the hook that the Web_Console uses to stream phase updates (Requirement 25.5) and that the CLI uses for its human-readable output. The engine holds an Erasure_Lease for the whole run and carries the lease's Fencing_Generation on every evidence write; a run begun without a held lease aborts before any mutation (Requirement 44.12).
+The thresholds are not a parameter: they are resolved from `seams.configuration` and written onto the run row, so the certificate states the values the run actually used rather than the values in force when it is read. Every model call, subprocess call, and reading of a clock is a seam, which is what makes the whole skeleton drivable with no credentials of any kind.
+
+Phases, transaction boundaries, and retry behaviour are specified in the erasure algorithm section. `progress` is the hook that the Web_Console uses to stream phase updates (Requirement 25.5) and that the CLI uses for its human-readable output. The engine holds an Erasure_Lease for the whole run and carries the lease's Fencing_Generation on every evidence write it sends itself; a run begun without a held lease aborts before any mutation (Requirement 44.12). The two evidence writes framed by other modules — the `backup_record` row and each `residue_candidate` row — present the same generation, so the claim holds across the whole path rather than only across the statements this module sends.
+
+The order of the steps before phase one is load-bearing rather than incidental. Backup evidence is secured **before** the working-tier purge, so a run that could secure no evidence of the cluster's prior state has deleted no Working_Memory row either, which is what Requirement 19.3 asks for. Every step from the ownership record onwards records an abort on failure, so a failed prelude does not leave a run row at `running` blocking this Client's binding writes.
 
 #### Lease_Manager
 
 ```python
-def acquire(client_id: UUID, owner: str, idempotency_key: str) -> LeaseGrant | LeaseRefusal
-def renew(lease: LeaseGrant) -> LeaseGrant                     # extends expiry by the interval
-def release(lease: LeaseGrant) -> None
-def current(client_id: UUID) -> LeaseState | None              # owner and generation
-def finalisation_for(idempotency_key: str) -> FinalisationRecord | None
+def acquire(store, client_id: UUID, owner: str,
+            idempotency_key: str, *, interval: LeaseInterval) -> LeaseGrant
+def renew(store, grant: LeaseGrant, *, interval: LeaseInterval) -> LeaseGrant
+def release(store, grant: LeaseGrant) -> None
+def current(store, client_id: UUID) -> LeaseState | None       # owner and generation
+def register_run(store, grant: LeaseGrant, run_id: UUID) -> str
+def finalise(store, grant: LeaseGrant, run_id: UUID, result: JsonObject) -> FinalisationRecord
+def finalisation_for(store, idempotency_key: str) -> FinalisationRecord | None
+def owner_identifier(configuration: Configuration | None = None) -> str
+def next_generation(highest: int) -> int
 ```
+
+Contention is a raised `LeaseRefusedError` carrying the current owner and generation rather than a returned refusal value, so a caller cannot proceed by ignoring a return. The engine translates it into the no-lease failure, because from the run's point of view the fact is that it holds no lease at all. An acquisition presenting the same owner and the same attempt key as a current lease is answered with that same grant rather than refused, so a retried attempt is not fought by its own predecessor.
 
 Exactly one worker may own an erasure for a Client at a time, and a worker that has lost ownership must not be able to write evidence — otherwise a certificate could be produced by a process that no longer speaks for the run.
 
@@ -770,7 +802,7 @@ ON CONFLICT (run_id, artifact_id) DO NOTHING
 RETURNING id;
 ```
 
-Zero returned rows with a live lease row means the presented generation is not current: Memory_Store raises `StaleFencingGeneration` carrying the presented and the current generation, emits `erasure.stale_generation_refused`, and **persists nothing** (Requirements 44.7, 44.8, 44.15). The same predicate wraps the run completion record and the certificate insert, so a stale owner can neither declare a run finished nor sign for it. The certificate carries the Fencing_Generation of the owner that finalised the run, which is what makes the fencing claim auditable from the document rather than only from the database (Requirement 44.11).
+Zero returned rows with a live lease row means the presented generation is not current: Memory_Store raises `StaleFencingGeneration` carrying the presented and the current generation, emits `erasure.stale_generation_refused`, and **persists nothing** (Requirements 44.7, 44.8, 44.15). The same predicate wraps the working-tier purge, the sweep, the residue candidate extension, every phase-marker move, the run completion record, the request status, and the certificate insert, so a stale owner can neither delete a working row, nor record a candidate set, nor extend one, nor declare a run finished, nor sign for it. It also wraps the `backup_record` row and each `residue_candidate` row, which are framed by the modules owning those statements and take the tenant and the generation as required arguments. The certificate carries the Fencing_Generation of the owner that finalised the run, which is what makes the fencing claim auditable from the document rather than only from the database (Requirement 44.11).
 
 **Idempotent finalisation.** Each run records one idempotency key, unique per run and carried on the lease. Finalising a run whose key is already marked finalised returns the recorded finalisation result and performs no mutation, so a retried or duplicated finalisation is a no-op that reports the original outcome rather than a second completion (Requirements 44.9, 44.10).
 
@@ -797,13 +829,28 @@ The verb prints the winning owner identifier, the generation at each takeover, a
 #### Residue_Detector and Adjudicator
 
 ```python
-def candidates(run: ErasureRun, thresholds: Thresholds) -> list[ResidueCandidate]
-def adjudicate(candidate: ResidueCandidate, context: AdjudicationContext) -> Adjudication
-def build_prompt(context: AdjudicationContext, candidate: ResidueCandidate) -> Prompt
-def stable_prefix(context: AdjudicationContext) -> str        # memoised per query artifact per run
+# Residue_Detector
+@dataclass(frozen=True)
+class FindingFence:                        # the tenant and the generation, as one value
+    client_id: UUID; generation: int
+
+def detect_residue(store: MemoryStore, run_id: UUID, policy: ResiduePolicy, *,
+                   permitted_clients: Sequence[UUID],
+                   fence: FindingFence | None = None,
+                   adjudicator: Adjudicator | None = None,
+                   read_only: bool = False) -> ResidueReport
+
+# Adjudicator
+def stable_prefix(self, query: QueryArtifact) -> str          # memoised per query artifact
+def cache_boundary(self, prefix: str) -> bool
+def build_prompt(self, query: QueryArtifact, candidate: Candidate) -> Prompt
+def adjudicate(self, query: QueryArtifact,
+               candidates: Sequence[Candidate]) -> AdjudicatedBatch
 ```
 
-The Adjudicator invokes the configured Text_Provider and records the provider name, the model identifier, the prompt digest, the returned classification, and the returned reasoning text per adjudicated candidate (Requirement 17.6). Prompt construction is designed for cache reuse and is specified in the prompt cache section below.
+The fence is one value rather than two parameters on purpose: a caller supplying a tenant without a generation would read as a fenced write while guarding nothing. A recording pass that names no fence is refused before the corpus is read, and a read-only pass — the CLI verb and the tool server, neither of which holds a lease — records nothing and so needs none.
+
+The Adjudicator invokes the configured Text_Provider and records the provider name, the model identifier, the prompt digest, the returned classification, and the returned reasoning text per adjudicated candidate (Requirement 17.6). It judges a whole batch of candidates against one query Artifact rather than one candidate at a time, which is what lets the shared prefix be built once and reused. Prompt construction is designed for cache reuse and is specified in the prompt cache section below.
 
 #### Sensitivity_Analyzer
 
@@ -891,9 +938,9 @@ On-demand backup creation does not exist in the cloud control plane, which expos
 
 | Path | Mechanism | Recorded |
 |---|---|---|
-| **Primary — `self_managed`** | A `BACKUP INTO` statement issued against the operator-owned S3_Bucket, before the first mutation of the run | Backup target URI, the exact statement issued, the backup timestamp, `backup_path = 'self_managed'`, `status = 'succeeded'`, `taken = true` |
+| **Primary — `self_managed`** | A `BACKUP INTO` statement issued against the operator-owned S3_Bucket, before the run's first mutation of memory content — which is the working-tier purge, not phase three | Backup target URI, the exact statement issued, the backup timestamp, `backup_path = 'self_managed'`, `status = 'succeeded'`, `taken = true` |
 | **Fallback — `managed_referenced`** | Entered only when the capability record reports the Self_Managed_Backup path unavailable. The most recent Managed_Backup identifier and timestamp are retrieved through the ccloud CLI | The identifier, the timestamp, the exact ccloud command vector, `backup_path = 'managed_referenced'`, `taken = false`, `referenced = true` |
-| **Neither** | No path succeeded and no skip flag was passed | `status = 'failed'` with the detail; the run aborts before any mutation and reports the backup failure (Requirement 19.3) |
+| **Neither** | No path succeeded and no skip flag was passed | `status = 'failed'` with the detail; the run records the aborted status with that detail, reports the backup failure, and leaves every memory-content table — the `working` tier included — unchanged (Requirement 19.3) |
 | **Skipped** | The operator passed the explicit skip-backup flag | `status = 'skipped'`; the certificate records the absent backup (Requirement 19.4) |
 
 The ccloud CLI is always invoked as a subprocess with an argument vector, never a shell string. The `taken` and `referenced` distinction matters for the certificate: a referenced Managed_Backup is evidence that a backup exists, not evidence that Molt created one, and the certificate says which (Requirement 19.7). Managed_Backups on the cluster's tier run on a fixed 24-hour schedule with a 30-day retention interval that Molt leaves unaltered, which is why the self-managed path is primary and is recorded as such in the documentation (Requirement 19.8).
@@ -1082,14 +1129,22 @@ Migrations are numbered SQL files under `src/molt/store/migrations/`, applied in
 | 008 | `008_attribution.sql` | Attribution_Version columns on `client_binding`, the partial uniqueness constraint on unsuperseded versions, the as-of index, the supersession-Event category |
 | 009 | `009_lease.sql` | `erasure_lease`, the partial uniqueness constraint admitting one current lease per Client, `fencing_generation` columns on `erasure_run`, `disposition`, and `erasure_certificate`, the run idempotency key and finalisation record |
 | 010 | `010_checkpoint.sql` | `ledger_checkpoint`, its index by window end, and the privilege exclusions |
-| 011 | `011_working_memory.sql` | `working_memory` and its Row-Level TTL at the 3600 second default |
+| 011 | `011_working.sql` | `working_memory` and its Row-Level TTL at the 3600 second default |
 | 012 | `012_confidence.sql` | `procedure_confidence` on `derived_artifact`, `procedure_retrieval`, `procedure_outcome`, `procedure_confidence_change` |
-| 013 | `013_referential_actions.sql` | `ON DELETE RESTRICT` on every foreign key referencing audit evidence, `ON DELETE CASCADE` on recomputable derived rows, removal of the Disposition's artifact foreign key, and removal of the two self-referencing foreign keys on `client_binding.superseded_by` and `erasure_lease.superseded_by` |
-| 014 | `014_roles_amend.sql` | Grants on the tables added by 008 through 012, the writer role's `SELECT` on `erasure_lease`, the Procedure_Confidence write confinement on `derived_artifact`, and the `DELETE` revocations of Requirement 46 criterion 5 |
+| 013 | `013_protection.sql` | `ON DELETE RESTRICT` on every foreign key referencing audit evidence, `ON DELETE CASCADE` on recomputable derived rows, the Disposition's artifact identifier deliberately left carrying no foreign key, and removal of the two self-referencing foreign keys on `client_binding.superseded_by` and `erasure_lease.superseded_by` |
+| 014 | `014_grants.sql` | Grants on the tables added by 008 through 012, the writer role's `SELECT` on `erasure_lease`, the three write confinements on `working_memory`, `derived_artifact`, and `erasure_lease`, the `DELETE` revocations of Requirement 46 criterion 5, and the checkpoint `UPDATE` and `DELETE` revocations |
+| 015 | `015_diff_summary.sql` | The nullable `removed_segments` and `retained_segments` counts on `disposition`, with the non-negativity check per column |
+| 016 | `016_reader_grants.sql` | The reader role's `SELECT` on `erasure_candidate` and `run_session`, the two tables read-only code reads that neither 007 nor 014 granted |
+| 017 | `017_erasure_references.sql` | Removal of the three references standing between an authorised erasure and its own subject: the Session's spawning Event reference, the Session's parent reference, and the Event's answering-parent reference, each column and index kept |
+| 018 | `018_console_reader_grants.sql` | The reader role's `SELECT` on `working_memory`, `erasure_request`, `backup_record`, `approval_queue`, and `policy_rule` — the five tables the console's two remaining read-only views count and read and that neither 007 nor 014 granted |
+| 019 | `019_watcher_capability_grants.sql` | The watcher role's `SELECT`, `INSERT`, and `UPDATE` on `capability` — the upsert its start-up change-stream probe performs, which 007 granted to the reader and the eraser and to no one else, so the deployed watcher died before its loop on every start |
+| 020 | `020_eraser_procedure_grants.sql` | The eraser role's `SELECT` on `procedure_retrieval`, `procedure_outcome`, and `procedure_confidence_change` — the three procedural reads the disposition phase performs to weigh a Learned_Procedure's standing, granted by 007 to the reader and the writer and to the eraser not at all, so an erasure stopped in its disposition phase |
+| 021 | `021_sweep_and_stream_grants.sql` | The eraser role's `DELETE` on `session`, and the watcher role's `SELECT` on `derived_artifact` and `lineage_edge` — the sweep removed a Session's Events and then stopped on the Session itself because `ledger` references `session` with no action rather than a cascade, and the core change stream is served only to a principal holding `SELECT` on every table it names, so the watcher had been silently consuming through its timestamp poll for as long as the statement had existed |
+| 022 | `022_eraser_cascade_deletes.sql` | The eraser role's `DELETE` on `procedure_retrieval`, `procedure_outcome`, and `procedure_confidence_change`, and the correction of 020's reasoning about them — this platform consults the deleting session's own privilege while a cascade expression is built, so a cascading reference widens what a role needs to the transitive closure of the children of everything it deletes rather than narrowing it, and a run stopped on the first of the three after removing everything it was authorised to remove |
 
-Migrations 008 through 014 are additive and idempotent like the first seven: column addition uses `IF NOT EXISTS`, constraint creation is guarded, and every privilege statement is re-runnable. The role grants for the new tables live in 014 rather than being folded back into 007, because a migration that has already been applied is never edited — the applied-version digest recorded in `schema_migration` would stop matching, and a re-run would report a corrupted history rather than a clean no-op.
+Migrations 008 through 022 are additive and idempotent like the first seven: column addition uses `IF NOT EXISTS`, constraint creation is guarded, and every privilege statement is re-runnable. The role grants for the new tables live in 014 rather than being folded back into 007, because a migration that has already been applied is never edited — the applied-version digest recorded in `schema_migration` would stop matching, and a re-run would report a corrupted history rather than a clean no-op.
 
-**Migrations 013 and 014 are not yet written, and that is where two corrections land.** The removal of the two self-referencing foreign keys belongs in 013 and the restoration of the writer role's `SELECT` on `erasure_lease` belongs in 014, for exactly the reason the paragraph above gives: 008 and 009 are already applied, and editing either file would change its digest, so the runner would refuse the next run rather than report a clean no-op. A correction to an applied migration is therefore always a new numbered file, never an edit, and the two unwritten files are the place each of these corrections is made.
+**Migrations 013 and 014 are where two corrections land, and both files carry them.** The removal of the two self-referencing foreign keys sits in 013 and the writer role's `SELECT` on `erasure_lease` sits in 014, for exactly the reason the paragraph above gives: 008 and 009 are already applied, and editing either file would change its digest, so the runner would refuse the next run rather than report a clean no-op. A correction to an applied migration is therefore always a new numbered file, never an edit, and these two files are where each of these corrections is made.
 
 **Two marker comments drive how the runner applies a file, and both are part of the migration contract rather than commentary.** A migration is applied inside one transaction that also writes its own history row, so the objects a file creates and the record of that file exist together or not at all. Two classes of statement cannot live inside that transaction, and each carries a marker written immediately above the statement it applies to:
 
@@ -1105,6 +1160,12 @@ Which files carry the own-transaction marker, and why each needs it:
 | 009 | `run_idempotency_unique` | Its predicate names the idempotency key column the same file adds, so the index creation must follow that column's own committed addition |
 | 011 | The `ALTER TABLE working_memory SET (…)` Row-Level TTL configuration | Setting Row-Level TTL on a table created earlier in the same transaction is a silent no-op, described in the migration 011 section below |
 | 012 | Both `CHECK` constraint replacements and `derived_procedure_confidence` | Same two reasons as 008: each constrains or indexes the Procedure_Confidence column the same file adds |
+| 013 | Every statement in the file, 28 in all: each of the thirteen protected or cascading references removed by the two names it may carry and re-added under one, plus the two self-reference removals | A constraint cannot be removed and re-added under one name inside a single transaction, and a second application of this file drops the constraint its own first application added, so marking every statement is what makes the file re-runnable rather than re-runnable once |
+| 014 | All three write-confinement guards, nine statements in all: each guard's trigger removal, function definition, and trigger attachment | Same reason as 007: attaching and removing a trigger are served only by the newer schema changer, and that changer is unreachable from a multi-statement transaction |
+| 015 | Both `CHECK` constraint replacements on `disposition`, four statements in all: a guarded drop and an addition per count column | A constraint cannot read a column added earlier in the same transaction, and the drop-then-add pairing that keeps the file re-runnable cannot be done under one name inside one transaction |
+| 017 | All three reference removals: the Session's spawning Event, the Session's parent, and the Event's answering parent | A guarded drop naming a constraint an earlier application of this file already removed is checked against state that transaction has not been shown, so the marker is what makes the file re-runnable |
+
+Migrations 001 through 006, 010, 016, and 018 carry no marked statement: each creates its objects, alters a table an earlier migration created in an earlier transaction, or issues grants, and none of those needs a transaction of its own.
 
 A statement in a migration's body therefore must not depend on either kind of marked statement, because both run after that body has committed.
 
@@ -1680,7 +1741,7 @@ The administrative path is exempt from both guards, because a database administr
 
 Attaching and removing a trigger are served only by the newer schema changer, which is unreachable from a multi-statement transaction, so every statement of both guards carries `-- molt:own-transaction`. The removal-then-definition-then-attachment order is what makes the trio re-runnable, since the cluster refuses to replace a definition a live trigger points at.
 
-**One grant is missing here on purpose and is restored by migration 014.** The writer role reads the current Erasure_Lease as part of the erasure guard read, but `erasure_lease` does not exist until migration 009, so this file cannot grant on it. Migration 014 must therefore carry `GRANT SELECT ON TABLE erasure_lease TO molt_writer`, and as delivered it does not — the grant is stated in the migration 014 block below as an obligation of that unwritten file rather than as something already applied.
+**One grant is missing here on purpose and is restored by migration 014.** The writer role reads the current Erasure_Lease as part of the erasure guard read, but `erasure_lease` does not exist until migration 009, so this file cannot grant on it. Migration 014 therefore carries `GRANT SELECT ON TABLE erasure_lease TO molt_writer`, and the block for that migration below states the grant as the obligation of that file it is rather than as a convenience.
 
 ### Migration 008: bitemporal attribution
 
@@ -1960,7 +2021,7 @@ Because a silent failure cannot be caught by watching for an error, verification
 DELETE FROM working_memory WHERE client_id = $1;   -- returns the aggregate row count
 ```
 
-One statement, one number recorded on the run row, no Dispositions (Requirement 42.13). The `artifact_ref` view is **not** extended to include this table, which is what structurally prevents a working row from becoming a lineage parent, an erasure candidate, or a binding subject (Requirement 42.12, Property 37).
+One statement, one number recorded on the run row in the same fenced transaction as the delete, no Dispositions (Requirement 42.13). It is issued after the run's backup evidence is secured, because it is the run's first mutation of memory content and Requirement 19.3 obliges the run to abort before any mutation when no backup could be taken. The `artifact_ref` view is **not** extended to include this table, which is what structurally prevents a working row from becoming a lineage parent, an erasure candidate, or a binding subject (Requirement 42.12, Property 37).
 
 ### Migration 012: confidence-weighted procedural memory
 
@@ -2091,16 +2152,26 @@ Which tables restrict and which cascade, with the reason for each (Requirement 4
 | `working_memory` → `session` | **CASCADE** | Scratch state for a Session that no longer exists is by definition disposable |
 | `client_binding.superseded_by` → `client_binding` | **no foreign key** | The closing statement names the successor's identifier before the successor row exists. Integrity is the transaction's, not a constraint's (Requirements 43.12, 43.13) |
 | `erasure_lease.superseded_by` → `erasure_lease` | **no foreign key** | The same ordering, for the same reason: the lease is closed naming a successor the next statement inserts (Requirements 44.17, 44.18) |
+| `session.spawning_event_id` → `ledger` | **no foreign key**, dropped by migration 017 | The Event may not go before the Session and the Session may not go before its own Events, so the pair is a cycle for deletion and one of the two references has to give |
+| `session.parent_session_id` → `session` | **no foreign key**, dropped by migration 017 | A tenant's Session tree is removed whole and a batch boundary cuts across it wherever the candidate ordering puts the parent, so requiring a child to be removed alongside or before its parent is a requirement no batching can honour |
+| `ledger.parent_event_id` → `ledger` | **no foreign key**, dropped by migration 017 | A result names the call it answers, and the call and its result belong to one Session and leave together, so the same batch-boundary argument applies unchanged |
+| `ledger` → `session` | **no explicit action**, left enforced | The reference that forbids an orphan Event, and the one of the four that sits in no cycle: it is satisfiable by ordering alone, and the disposition phase orders for it (Requirement 18.1) |
 
 A refused delete raises with the referencing table name and the referencing row count, so the operator learns what is holding the row rather than only that something is (Requirement 46.2).
 
-**This migration is not yet written, which is what makes it the right place for the two self-reference removals.** Migrations 008 and 009 are already applied and each added its self-reference, and an applied migration is never edited: changing either file would change the digest recorded in `schema_migration`, and the runner would refuse the next run rather than report a clean no-op. Landing the removals here means no applied file moves and no migration digest breaks, and the two-statement supersession shapes the attribution and lease sections specify become correct the moment this file is applied.
+**This migration is the right place for the two self-reference removals, and it carries both of them.** Migrations 008 and 009 are already applied and each added its self-reference, and an applied migration is never edited: changing either file would change the digest recorded in `schema_migration`, and the runner would refuse the next run rather than report a clean no-op. Landing the removals here means no applied file moves and no migration digest breaks, and the two-statement supersession shapes the attribution and lease sections specify hold once this file is applied.
 
 ### Migration 014: role grants for the new tables
 
 ```sql
 GRANT SELECT, INSERT ON TABLE working_memory TO molt_writer;
 GRANT UPDATE ON TABLE working_memory TO molt_writer;
+-- The value, its update instant, and its expiry are writable; the owning Session,
+-- the scratch key, and the owning Client are not, which a guard of the same shape
+-- as migration 007's enforces.
+-- molt:own-transaction
+CREATE TRIGGER molt_working_memory_update_scope_guard BEFORE UPDATE ON working_memory
+    FOR EACH ROW EXECUTE FUNCTION molt_working_memory_update_scope();
 GRANT SELECT, INSERT ON TABLE procedure_retrieval, procedure_outcome,
     procedure_confidence_change TO molt_writer;
 
@@ -2143,7 +2214,7 @@ REVOKE UPDATE, DELETE ON TABLE ledger_checkpoint, checkpoint_session
 
 The eraser role's loss of `DELETE` on the audit tables is the privilege half of migration 013's structural half: the referential actions stop a cascade from removing evidence, and the revocation stops a direct statement from doing it. Neither alone is sufficient, because `ON DELETE RESTRICT` says nothing about deleting a row nothing references, and a privilege revocation says nothing about a cascade the database performs on the role's behalf.
 
-Two obligations of this file are worth stating plainly, because this file is not yet written. The first is the writer role's `SELECT` on `erasure_lease`: migration 007 could not grant it, since the table arrives in 009, and the writer reads the current lease as part of the erasure guard read on every binding write, so the grant is required rather than tidy. The second is that each of the three write confinements this file adds is a guard rather than a column list, for the reason migration 007 gives — `GRANT` on this cluster admits a table and a privilege and nothing finer — and every guard statement carries `-- molt:own-transaction`, since attaching a trigger is served only by the newer schema changer (Requirements 27.3, 27.13, 44.1, 49.14).
+Two obligations this file carries are worth stating plainly, because a reader skimming a wall of grants would not see either. The first is the writer role's `SELECT` on `erasure_lease`: migration 007 could not grant it, since the table arrives in 009, and the writer reads the current lease as part of the erasure guard read on every binding write, so the grant is required rather than tidy. The second is that each of the three write confinements this file adds is a guard rather than a column list, for the reason migration 007 gives — `GRANT` on this cluster admits a table and a privilege and nothing finer — and every guard statement carries `-- molt:own-transaction`, since attaching a trigger is served only by the newer schema changer (Requirements 27.3, 27.13, 44.1, 49.14).
 
 ### Migration 015: the structural diff summary a redaction leaves
 
@@ -2170,6 +2241,78 @@ A surgical redaction's whole claim is that one tenant's content left a shared bo
 Three shapes here are load-bearing rather than incidental. The counts are counts and never text: a stored diff, or a stored list of the segments that went, would be a copy of the pre-redaction body under another name, and the Disposition table is precisely the place no body may land. Both columns are nullable, because two of the three dispositions summarise no rewrite — a hard delete removed the body outright and a retention left it untouched — so absence is the honest value and a zero would be a claim that a rewrite dropped nothing. And the non-negativity is asserted per column rather than over the pair, so a row carrying one count and not the other is still checked on the count it carries; whether the pair travels together is the writing path's business, and every disposition of every path goes through one insert.
 
 The constraint statements are separated from the column additions because a constraint cannot be dropped and re-added under one name inside the same transaction that added the column it reads: the column is not yet visible to the constraint builder. The column additions therefore stay in the migration's own transaction and each constraint statement carries the marker asking for a transaction of its own. The drop-then-add pairing is what keeps the file re-runnable, since a constraint addition admits no guard of its own. No privilege is granted here, because the Disposition table's privileges are already carried by the grants migration and a column added to an existing table is covered by that table-level grant (Requirements 18.2, 18.5, 49.14).
+
+### Migration 016: the two reads the read-only role was never granted
+
+```sql
+GRANT SELECT ON TABLE erasure_candidate, run_session TO molt_reader;
+```
+
+Migration 007 granted the reader the tables the read-only paths were known to read at the time, and migration 014 granted the tables the second generation created. Two tables that read-only code genuinely reads fall between those two files, so the reader holds `SELECT` on neither and both paths fail on a missing privilege rather than on anything to do with what they were asked to do. This is not a projection: the delivered cluster refuses the read outright, reporting that the reader role holds no `SELECT` privilege on `erasure_candidate`. This file grants exactly those two reads and nothing else.
+
+The first is the candidate set of an Erasure_Run. The Sensitivity_Analyzer's residue walk reads it twice — once to take the run's longest text-bearing Artifacts as the material it adjudicates, and once to establish that a finding it is about to record names an Artifact the explicit sweep did not already claim. That walk refuses any role but the read-only one, deliberately, because a scan looking for content that survived an erasure must not be able to change anything while it looks, so the missing grant is not a shortfall a caller works around by connecting differently. Without it the Sensitivity_Analyzer cannot run at all in a deployment configured as intended, and neither can the Molt_MCP_Server's residue tool. Migration 007 names the Sensitivity_Analyzer as a consumer of this role, so the omission is an oversight in that file's grant list rather than a decision it recorded.
+
+The second is the per-run, per-Session record an erasure leaves behind. The Certificate_Verifier reaches `run_session` while checking that the Ledger_Checkpoint a certificate names is accounted for: the query asking which runs account for a change to one Session has a second arm for the deletion case, where the Ledger row is gone and nothing joins to it, and that arm is a join against this table. A verifier is by definition a third party that mutates nothing and connects with the read-only role for that reason, so the read is reachable only with the grant above. Its absence makes every certificate naming a checkpoint unverifiable, which is the one thing a certificate exists to be.
+
+`SELECT` and nothing further, on both tables. The point of this role is that it cannot write, and a grant of `INSERT`, `UPDATE`, or `DELETE` here would undo the guarantee the two paths above rest on rather than merely widen it: the record of an erasure is evidence, and evidence a reader could edit would be worth as little as a certificate a reader could sign. No guard is needed for re-runnability, because a repeated `GRANT` on this cluster is re-issuable with no second effect, so applying this file twice leaves the privileges the first application left. And the grants are a new file rather than an addition to the list they belong in, for the reason every correction in this sequence is: the runner records a digest per applied file and refuses to run when a recorded digest no longer matches, so folding these two grants back into an applied migration would break every database that has already applied it (Requirements 22.8, 27.5, 27.9, 45.8, 48.5).
+
+### Migration 017: the references an authorised erasure has to be able to cut
+
+```sql
+-- The spawning reference, the cycle's first half, named by both spellings it may
+-- carry: the name migration 001 gave it and the name the platform generates for an
+-- inline declaration on that column.
+-- molt:own-transaction
+ALTER TABLE session
+    DROP CONSTRAINT IF EXISTS session_spawning_event_fk,
+    DROP CONSTRAINT IF EXISTS session_spawning_event_id_fkey;
+
+-- The parent Session reference. A batch boundary cuts across a Session tree
+-- wherever the candidate ordering happens to put the parent.
+-- molt:own-transaction
+ALTER TABLE session DROP CONSTRAINT IF EXISTS session_parent_session_id_fkey;
+
+-- The answering Event reference. A call and the result answering it belong to one
+-- Session and leave together.
+-- molt:own-transaction
+ALTER TABLE ledger DROP CONSTRAINT IF EXISTS ledger_parent_event_id_fkey;
+
+-- ledger.session_id and ledger.client_id stay enforced. Neither sits in a cycle.
+```
+
+Removing a tenant's Sessions and the Events recorded in them is a governed operation with a request, a fenced lease, a candidate set, a Disposition per Artifact, and a signed certificate behind it. Three of the references migration 001 declared stand between that operation and the rows it was authorised to remove, and they stand there in a shape no delete order satisfies. A sub-agent Session names the Event of its parent Session that spawned it, and every Event names the Session it was recorded in: the Event may not go before the Session and the Session may not go before its own Events, so the pair is a cycle for deletion and one of the two references has to give. The two self-references are the same problem drawn inside a single table — a parent Session and a child Session, or a tool call and the result answering it, are removed by one authorised operation, and neither half of such a pair may be required to outlive the other or to be found in the same batch as it.
+
+Dropping the enforcement rather than the columns is the decision, and it is the decision this schema has already taken twice for the same reason: `checkpoint_session.session_id` carries no reference of any kind and `disposition.artifact_id` carries none either, because a reference that would either refuse the erasure or vanish along with it defeats the record it was meant to protect (Requirement 46.4). A reference standing between an authorised erasure and its own subject is that same reference under another name, so it gets the same answer. No lineage becomes unreadable: every dropped column stays and keeps its value, the index over each of them stays, and the derivation graph is carried independently in `lineage_edge`, which is where a reader follows provenance from in any case. What goes is the cluster's refusal, not the record.
+
+`ledger.session_id` stays enforced, and saying why is the point of keeping it. It forbids an orphan Event, since an Event belonging to a Session that does not exist records nothing that can be read, and it sits in no cycle: no Session is ever required to outlive an Event through it. `ledger.client_id` stays for the opposite reason — a tenant's Client row is what the erasure was requested for and what its evidence is filed against, so nothing about a governed deletion asks that reference to give way.
+
+Two consequences of this file are load-bearing and belong beside it rather than in the paths that carry them.
+
+- **The hard delete orders its decisions.** `ledger.session_id` is satisfiable by ordering alone, and the disposition phase now orders for it: the decisions are sorted so that every Event is removed in an earlier batch than, or the same batch as, any Session. The sort is stable and its key has two values, so every other Artifact kind keeps the relative order it arrived in. That ordering is what makes this the one reference of the four that costs nothing to keep (Requirement 18.1).
+- **The absent-parent refusal moved into the write path, and did not lapse with the reference.** `src/molt/store/sessions.py` guards `INSERT_SESSION_STATEMENT` with two joins, one for the named parent Session and one for the named spawning Event, each paired with a predicate reading *either this Session named no such row, or the join for it found one*. A Session naming a parent or a spawning Event that does not exist therefore selects nothing, inserts nothing, and returns nothing, and the empty result is reported as `MissingParentError`. Both lookups are joins of the inserting statement, so the check is inside the inserting transaction, costs no round trip, and cannot race a delete committing between a probe and an insert (Requirement 9.7).
+
+Every statement asks for a transaction of its own. A guarded drop naming a constraint an earlier application of this file already removed is checked against state that transaction has not yet been shown, so marking the statements is what makes the file re-runnable rather than re-runnable once; the runner writes this file's history row only after every marked statement has succeeded, so an interrupted application is re-applied whole. The spawning reference is named by both spellings it may carry, the explicit one migration 001 gave it and the one the platform generates for an inline declaration, so the file removes the reference whichever way it was created and the committed state is the same either way (Requirements 27.2, 27.13, 46.9).
+
+### Migration 018: the five reads the console's read-only views were never granted
+
+```sql
+GRANT SELECT ON TABLE working_memory, erasure_request, backup_record,
+    approval_queue, policy_rule TO molt_reader;
+```
+
+This is migration 016's finding again, in two more views, and it is worth stating as a class rather than as two more names. The reader's grant list was assembled twice — once in 007 for the tables the first generation created, once in 014 for the tables the second generation created — and both times the list was drawn from the read-only *components* that existed then. A table that only a Web_Console view reads was in neither list, because when those files were written the console read through whichever handle was in scope, and the handle in scope was the eraser's. Narrowing the console's read-only views onto `Console.read_only_store()` is what turned that latent gap into a failure: the views stopped borrowing a privilege they were never granted.
+
+Two views are affected and both are views a reviewer opens rather than paths an operator can route around.
+
+The Memory_Tier view sums nine tables for the `action` tier, two of which are `erasure_request` and `backup_record`, and it counts `working_memory` for the `working` tier, reads that table's expired rows against the cluster's own current timestamp, and reads the table's stored definition back to report when the expiry job next runs (Requirements 25.15, 42.16, 42.17). So three of the tables it counts were unreachable to it. The view takes the read-only connection deliberately — a page reporting row counts must not hold a handle that could change them — and it is available unchanged in demonstration mode (Requirement 42.19), which is the configuration a public reviewer sees.
+
+The Approval_Queue listing reads the queue joined to the rule that raised each entry, so `approval_queue` and `policy_rule` were both unreachable (Requirement 23.10). The listing takes the read-only connection while the resolution beside it keeps the writing one, and that split is exactly what exposed the gap.
+
+`SELECT` and nothing further, on all five. The working tier makes that worth restating rather than assuming: the one tier the reader may now count is the one tier whose rows are freely overwritten, so any wider grant would let a read-only path disturb the numbers it exists to report. The queue is sharper still — an approval is a record of a human decision, and the role that renders the queue must not be able to answer an entry, so resolving one stays with the writing role (Requirement 27.5).
+
+**This file also carries a correction it cannot make where the claim is written.** Migrations 007 and 014 both describe `molt_reader` as the role backing the Auditor views. It does not. `provision_roles.sh` creates a schema per Auditor, defines that Auditor's four views in it filtered to that Auditor's own Client, and grants `SELECT` on those views directly to that Auditor's own database login; it grants the reader role to no Auditor. The narrower shape is deliberate: an Auditor is an untrusted third party acting for one departing Client, and granting it this role would widen its reach to everything the role can read across every Client, where the per-Auditor grant reaches one Client's views and stops (Requirements 24.2, 24.5, 24.7). Neither applied file can be edited to say so — the runner records a digest per applied file and refuses to run when a recorded digest stops matching — and this is the first later migration to touch the reader's grants, which makes it the vehicle. `docs/glossary.md` and `docs/auditor.md` state the delivered arrangement.
+
+No statement here carries the own-transaction marker, and no guard is needed for re-runnability: a repeated `GRANT` is re-issuable with no second effect, so applying this file twice leaves the privileges the first application left (Requirement 27.9).
 
 ### Hash chain design
 
@@ -2337,28 +2480,36 @@ No transaction is ever held open across a model call or a subprocess call. Each 
 |---|---|---|---|
 | T-1 | SERIALIZABLE | read the highest Fencing_Generation for the Client, insert `erasure_lease` with that value plus one and `expires_at = now() + interval` | Refused when a current lease is held by another owner. **No lease, no run**: the engine aborts here before any mutation and reports the current owner (Requirements 44.3, 44.4, 44.12) |
 | Idempotency check | read-only | look up the idempotency key in `erasure_run` | An already-finalised key returns the recorded finalisation result and performs no mutation (Requirement 44.10) |
-| T0 | SERIALIZABLE | insert `erasure_request` if new, insert `erasure_run` with `t_before = now()`, `status = running`, `phase = sweep`, thresholds, `lease_id`, `fencing_generation`, `idempotency_key` | The insert into `run_active_by_client` is the conflict footprint that concurrent binding writers read (Requirement 15.3) |
-| T0b | SERIALIZABLE, fenced | `DELETE FROM working_memory WHERE client_id = $c`, then record the row count in `erasure_run.working_rows_deleted` | One aggregate count, no Dispositions; the `working` tier is disposable by design (Requirement 42.13) |
-| Backup | none | ccloud CLI subprocess, then a short transaction inserting `backup_record` | Failure aborts the run before any mutation (Requirement 19.3) |
-| Renewal | SERIALIZABLE, background | extend `expires_at` by the lease interval at roughly a third of the interval | Runs concurrently with every phase below, so a long phase does not lose the lease to expiry (Requirement 44.5) |
-| T1 | SERIALIZABLE | five `INSERT ... SELECT` statements into `erasure_candidate`, then `run_session` population, then `phase = residue` | Whole sweep is server-side; no candidate identifier crosses the wire |
+| T0 | SERIALIZABLE | insert `erasure_request` at `status = running`, insert `erasure_run` with `t_before = now()`, `status = running`, `phase = sweep`, thresholds, `fencing_generation`, `idempotency_key` | Both inserts are one transaction, so a failure leaves neither row. The run row, which the `run_active_by_client` partial index serves, is the conflict footprint that concurrent binding writers read (Requirement 15.3). This is the one step no abort can cover, because a failure here leaves no run row to record an abort against — and none at `running` to refuse this Client's binding writes either |
+| T0a | SERIALIZABLE | record the run identifier against the held lease | First step of the prelude, sent after T0 rather than inside it precisely so that it and everything after it can abort against an existing run row |
+| Backup | none, then SERIALIZABLE and fenced twice | `BACKUP INTO` or a ccloud CLI subprocess outside every transaction, then a short fenced transaction inserting `backup_record`, then a second fenced transaction naming the backup on the run row | Failure records the aborted status and re-raises, with **no memory content touched at all**: the backup precedes the working purge as well as every phase (Requirement 19.3). The fence cannot withhold the backup itself, only the row claiming it |
+| T0b | SERIALIZABLE, fenced | `DELETE FROM working_memory WHERE client_id = $c` and the resulting count into `erasure_run.working_rows_deleted`, **in one transaction** | The run's first mutation of memory content, so it follows the backup. One aggregate count, no Dispositions; the `working` tier is disposable by design (Requirement 42.13). Delete and count commit together behind the fence, so a superseded owner removes no row and records no number |
+| Renewal | SERIALIZABLE, background | extend `expires_at` by the lease interval at roughly a third of the interval | Runs concurrently with every phase below, so a long phase does not lose the lease to expiry (Requirement 44.5). A refused renewal is recorded rather than raised; the run's next fenced write is where a lost lease is decided |
+| T1 | SERIALIZABLE, fenced | six `INSERT ... SELECT` statements into `erasure_candidate` carrying five selection reasons, then `run_session` population, then `unembedded_count`, then `phase = residue` | Whole sweep is server-side; no candidate identifier crosses the wire. Fenced rather than plain: the candidate set, the run's Session records, and the pending-embedding count are all evidence about the run, so a superseded owner writes none of them |
 | Read phase | read-only | index-served vector queries per query artifact | Outside a write transaction; results held in memory as candidate rows |
 | Model calls | none | Text_Provider adjudication per review-band candidate, grouped by query artifact so the Stable_Prefix is reused | Bounded concurrency, no transaction open |
-| T2 | SERIALIZABLE | insert `residue_candidate` rows, insert included residue into `erasure_candidate`, `phase = disposition` | Idempotent on retry through `residue_unique_per_run` |
+| T2 | SERIALIZABLE and fenced per finding, then SERIALIZABLE and fenced | the Residue_Detector frames one fenced transaction per finding to insert its `residue_candidate` row; the engine then inserts the included residue into `erasure_candidate` and moves `phase = disposition`, also fenced | Idempotent on retry through `residue_unique_per_run`. Both halves are fenced, so a superseded owner records no finding and extends no candidate set. A refused finding write propagates out of the walk, which is what ends the run that owned it |
 | T3a | SERIALIZABLE, fenced, one per batch of 100 | classify candidates, insert `disposition` rows for `hard_delete` and `retained` carrying the writer's generation, delete artifact rows, embeddings, edges, bindings | Deletes are idempotent; `disposition_unique_per_run` makes reinsertion a no-op. A stale generation refuses the whole batch and persists nothing (Requirements 44.7, 44.8) |
 | Rewrite call | none | Text_Provider rewrite per blended artifact | One call per artifact, bounded concurrency |
 | T3b | SERIALIZABLE, fenced, one per artifact | write replacement body, recompute digest, replace embedding, delete edges to parents whose current attribution names the erased Client only, close the erased Client's Attribution_Version, insert `disposition` | Requirement 18.4 makes this one transaction |
-| T4 | SERIALIZABLE, fenced | `t_after = now()`, `status = completed`, `phase = certificate`, `unembedded_count`, `finalised_at`, `finalisation_result` | Requirements 18.9, 44.7, 44.9 |
-| T5 | SERIALIZABLE, fenced | insert `erasure_certificate` with payload, digest, signature, object key, version, and the finalising Fencing_Generation | After signing and storage (Requirements 44.7, 44.11) |
+| T4 | SERIALIZABLE, fenced | `t_after = now()`, `status = completed`, `phase = certificate`, `finished_at`, then `finalised_at` and `finalisation_result` on the attempt, then `erasure_request.status = completed` | Three fenced writes rather than one: the run says what it did, the attempt says it is over and what it returned, and the request follows the run's ending. A superseded owner declares none of them (Requirements 18.9, 44.7, 44.9). `unembedded_count` is written at T1, not here |
+| T5 | SERIALIZABLE, fenced where the run states a generation | insert `erasure_certificate` with payload, digest, signature, object key, version, and the finalising Fencing_Generation | After signing and storage (Requirements 44.7, 44.11). A run predating the lease columns states no generation and so has no fence to present; its insert is still one serializable transaction and the certificate carries a null generation rather than a number nobody can check |
 | Release | SERIALIZABLE | mark the lease superseded | On an aborted run the lease is left to expire instead, so a crashed worker's ownership lapses on the clock rather than needing a cleanup path (Requirement 44.6) |
 
 **Retry strategy.** Every transaction above runs through `in_serializable`: on SQLSTATE `40001`, roll back, sleep `min(2.0, 0.05 * 2**attempt) * uniform(0.5, 1.5)` seconds, and re-execute the whole transaction body, at most 5 attempts, then raise and emit `store.serialization_exhausted` (Requirements 15.4, 15.5). Every transaction body is written to be replayable: candidate and disposition inserts use `ON CONFLICT DO NOTHING`, deletes are set-based and idempotent, and the surgical rewrite reads the artifact's current digest inside the transaction and skips if it already equals the post-redaction digest. Because retry re-executes rather than resumes, batch size 100 keeps a retry cheap under contention.
 
-**Dry run.** With the dry-run flag, T0 sets `dry_run = true`, T0b is skipped entirely so no Working_Memory row is deleted, T1 and T2 run unchanged because their writes are run-scoped evidence rather than memory content, T3a and T3b compute and insert `disposition` rows but execute no delete, no body write, no embedding replacement, and no attribution closure, and T4 records `t_after`. No `ledger`, `session`, `derived_artifact`, `lineage_edge`, `client_binding`, `embedding`, or `working_memory` row is touched, which is exactly the purity property of Requirement 18.11 and Property 19. A dry run still acquires a lease, because two concurrent dry runs writing evidence for the same Client would produce two candidate sets attributed to one Client with no record of which worker produced which. The CLI prints the computed dispositions.
+**A failure before phase one records an abort, exactly as a failure inside one does.** Every step from T0a onwards — the ownership record, the identity read, the backup, and the working purge — runs under a failure path that records `status = aborted` against the phase reached and then re-raises. This matters beyond tidiness: a run row left at `running` refuses every binding write for that Client until something closes it, so a backup failure or a store failure in the prelude used to block that tenant's ingest indefinitely. The one step this cannot cover is T0 itself, and the transaction covers it instead: the request insert and the run insert commit together, so a failure of either leaves no run row to record an abort against and equally none at `running` to refuse a binding write. Where the abort write is itself refused for supersession, the refusal is recorded rather than raised over the failure that caused the abort, because a superseded owner being unable to mark its own run aborted is the fence working rather than a second fault. An aborting run does not release its lease: a crashed worker and a cleanly aborted one then give ownership back by the same rule, on the cluster's clock.
+
+**Every evidence write on the erasure path is fenced, with no exception.** The working purge and its count, the `backup_record` row, the backup's record on the run row, the sweep, every `residue_candidate` row, the candidate extension, every Disposition, every phase-marker move, the run completion, the finalisation, the request status, and the certificate insert all present the generation their worker believes it holds, read inside each write's own transaction. Two of those used to sit outside the fence and no longer do, and the shape of each fix is worth stating because it is where the rule was easiest to lose:
+
+- **`residue_candidate` rows** are recorded one to a fenced transaction, framed by the Residue_Detector rather than by the run skeleton. The tenant and the generation travel into the detector as a single value, so a caller cannot supply one without the other and read as fenced while guarding nothing. A pass that records anything and names no fence is refused before the corpus is read at all, which is what keeps the read-only exposures — the `residue` verb and the `residue_candidates` tool, which hold no lease — honest rather than exempt.
+- **The `backup_record` row** is written behind the fence too, and both the tenant and the generation are required rather than defaulted, because every caller reaches that write after ownership was taken and before the first mutation. What the fence cannot withhold is the backup itself: the `BACKUP INTO` statement and the control-plane command run outside every transaction, so a superseded owner may already have caused a backup to exist while leaving no row claiming it did.
+
+**Dry run.** With the dry-run flag, T0 sets `dry_run = true`, T0b is skipped entirely so no Working_Memory row is deleted, T1 and T2 run unchanged because their writes are run-scoped evidence rather than memory content, T3a and T3b compute and insert `disposition` rows but execute no delete, no body write, no embedding replacement, and no attribution closure, and T4 records `t_after`. No `ledger`, `session`, `derived_artifact`, `lineage_edge`, `client_binding`, `embedding`, or `working_memory` row is touched, which is exactly the purity property of Requirement 18.11 and Property 19. A dry run still acquires a lease, because two concurrent dry runs writing evidence for the same Client would produce two candidate sets attributed to one Client with no record of which worker produced which. It also releases that lease at T4, exactly as a completed run does: a rehearsal that kept the remainder of its window would block the run it was performed for, because a lease is not re-takeable by the same owner under a new attempt key, so *rehearse, read the plan, erase* would be refused until the interval ran out. The CLI prints the computed dispositions.
 
 ### Phase one: explicit sweep
 
-Five set-based statements, each recording its selection reason, all inside T1 (Requirement 16.2–16.7). `$1` is the run identifier and `$2` the erased Client identifier throughout.
+Six set-based statements carrying five selection reasons — the below-floor procedure selection records `client_binding`, the same reason the current-binding statement records — all inside T1, which is a fenced transaction (Requirement 16.2–16.7). Statement order is not interchangeable: the lineage traversal seeds from the rows the first four statements wrote, and the embedding selection seeds from everything before it. `$1` is the run identifier and `$2` the erased Client identifier throughout.
 
 ```sql
 -- Sessions owned by the Client
@@ -2437,7 +2588,7 @@ WHERE t.rn = 1
 ON CONFLICT DO NOTHING;
 ```
 
-Artifacts in `embedding_state = 'pending'` are selected by the binding and descendant statements like any other, because selection is by identity and lineage rather than by embedding presence. Their count is recorded in `erasure_run.unembedded_count` and reported in the certificate (Requirements 10.9, 16). The 60 second bound for 100000 Artifacts is met because all five statements are index-served set operations with no per-row round trip (Requirement 16.8).
+Artifacts in `embedding_state = 'pending'` are selected by the binding and descendant statements like any other, because selection is by identity and lineage rather than by embedding presence. Their count is written to `erasure_run.unembedded_count` by the last statement of this same phase — an absolute assignment rather than an increment, so a retried transaction lands on the same number — and reported in the certificate (Requirements 10.9, 16). The 60 second bound for 100000 Artifacts is met because every statement is an index-served set operation with no per-row round trip (Requirement 16.8).
 
 ### Phase two: semantic residue detection
 
@@ -2471,7 +2622,7 @@ The candidate set exclusion happens in SQL as well as in the loop, by anti-joini
 
 **Fail-closed.** Any provider failure — throttling after retries, timeout, malformed response that does not parse to a known label, or credential failure — classifies the affected candidates as `include` with `decision_reason = 'adjudication_unavailable_fail_closed'` and `adjudicated = false` (Requirement 17.8). The bias is deliberate: an over-inclusive erasure costs memory utility, an under-inclusive erasure breaks the contractual claim.
 
-**Read-only exposure.** The CLI `residue` verb runs exactly this phase against a synthetic run row marked `dry_run = true`, prints candidates with distances and decisions, and performs no mutation of memory content (Requirement 17.9). The Molt_MCP_Server's `residue_candidates` tool runs the identical path.
+**Read-only exposure.** The CLI `residue` verb runs exactly this phase against a synthetic run row marked `dry_run = true`, prints candidates with distances and decisions, and writes nothing at all — not merely no memory content, but no `residue_candidate` row either, because the pass is constructed with recording suppressed and therefore needs no lease and no fence (Requirement 17.9). The Molt_MCP_Server's `residue_candidates` tool runs the identical path.
 
 ### Adjudication prompt structure and cache efficiency
 
@@ -2760,25 +2911,48 @@ verify(source, store):
     pubkey := kms.get_public_key(envelope.signature.kms_key_id)
     if not verify_ecdsa(pubkey, envelope.signature.value, digest): fail('signature_invalid')
 
-    # 2. Verification queries against the live cluster, read-only role
+    # 2. Verification queries against the live cluster, read-only role.
+    #    The template registry is this module's own, and so is the expectation:
+    #    the document supplies a template name and bound parameters, never the
+    #    statement that is run and never what the result must be.
     for q in envelope.payload.verification_queries:
-        rows := store.execute(q.sql, q.params)     # bound parameters from the certificate
-        record(q.name, row_count = len(rows))
-        if q.expectation == 'empty' and rows: fail('erasure_incomplete', ids = rows)
+        t := QUERY_TEMPLATES.get(q.name)
+        if t is null:                       fail('query_template_unknown', q.name)
+        if q.sql != t.documented_sql:       fail('query_template_unknown', q.name)
+        if len(q.params) != t.parameter_count: fail('query_template_unknown', q.name)
+        if q.expectation != t.expectation:  fail('query_template_unknown', q.name, q.expectation)
+        rows := store.execute(t.statement, q.params)   # this module's statement, bound params
+        record(q.name, expectation = t.expectation, row_count = len(rows))
+        if t.expectation == 'empty' and rows: fail('erasure_incomplete', ids = rows)
+    for name in OBLIGATORY_TEMPLATE_NAMES where name not presented:
+        fail('verification_query_missing', name)        # a check never made is reported
 
     # 3. Before and after counts — derived mechanism is primary
     before, after := derive_from_ledger_and_dispositions(envelope.payload, store)
-    record('count_derivation', 'ledger_and_dispositions')
-    compare(before, after, envelope.payload.counts)      # agreement or disagreement
+    record('recorded_count_derivation', 'ledger_and_dispositions')
+    if before disagrees: fail('count_disagreement', 'artifacts_bound_before')
+    if after  disagrees: fail('count_disagreement', 'artifacts_bound_after')
 
-    # 3b. Opportunistic corroboration, only inside the garbage-collection horizon
-    if within_gc_horizon(store, t_before) and within_gc_horizon(store, t_after):
-        h_before := store.historical(COUNT_SQL, params, at = t_before)
-        h_after  := store.historical(COUNT_SQL, params, at = t_after)
-        record('historical_corroboration', agrees = (h_before, h_after) == (before, after))
-    else:
+    # 3b. Opportunistic corroboration, only inside the garbage-collection horizon.
+    #     Every branch that declines to attempt it records a reason, and no reason
+    #     is a failed check.
+    if t_after is null:
         record('historical_corroboration', attempted = false,
-               reason = 'outside_gc_horizon')            # not a failed check
+               reason = 'run_records_no_after_instant')
+    elif horizon could not be read:
+        record('historical_corroboration', attempted = false,
+               reason = 'gc_horizon_unprobed')
+    elif not (within_gc_horizon(t_before) and within_gc_horizon(t_after)):
+        record('historical_corroboration', attempted = false,
+               reason = 'outside_gc_horizon')
+    else:
+        try:
+            h_before := store.historical(COUNT_SQL, params, at = t_before)
+            h_after  := store.historical(COUNT_SQL, params, at = t_after)
+            record('historical_corroboration', agrees = (h_before, h_after) == (before, after))
+        except store refusal:
+            record('historical_corroboration', attempted = false,
+                   reason = 'historical_read_refused')
 
     # 4. Hash chains of every named Session
     #    A Session this run hard-deleted is expected to be absent, and the
@@ -2795,20 +2969,25 @@ verify(source, store):
             continue                                     # tip comparison does not apply
         if not report.ok: fail('chain_mismatch', session = s.session_id,
                                first_mismatch_seq = report.first_mismatch_seq)
-        if report.terminal_digest != s.terminal_chain_digest:
+        if s.terminal_chain_digest is null:
+            record('session_tip_not_recorded', session = s.session_id)   # nothing to compare
+        elif report.terminal_digest != s.terminal_chain_digest:
             fail('chain_tip_mismatch', session = s.session_id)
 
     # 4b. The named Ledger_Checkpoint, covering every Session in its window
     cp := envelope.payload.ledger_checkpoint
     if cp is not null:
         cr := checkpoint_signer.verify(cp.checkpoint_id)
+        if cr could not be found: fail('checkpoint_absent', cp.checkpoint_id)
         if not cr.signature_ok: fail('checkpoint_signature_invalid', cp.checkpoint_id)
         if not cr.digest_agrees:
             explained, unexplained := partition(cr.changed_sessions,
                                                 by = accounted_for_by_dispositions)
-            record('checkpoint_disagreement', explained_by_runs = cr.accounting_run_ids,
+            record('checkpoint_disagreement_explained', explained_by_runs = cr.accounting_run_ids,
                    sessions = cr.changed_sessions)
             if unexplained: fail('checkpoint_unexplained_change', sessions = unexplained)
+        if latest_before(t_before) names a different checkpoint:
+            record('checkpoint_is_not_the_latest_before_run', latest.checkpoint_id)
 
     # 5. Disposition consistency
     for d in envelope.payload.dispositions where d.disposition == 'surgical_redaction':
@@ -2821,7 +3000,11 @@ verify(source, store):
                               failed_checks = failures, per_query_counts = ...)
 ```
 
-The verifier connects with the reader role only (Requirements 22.8, 27.5). Embedded query parameters travel as bound parameters, never interpolated, so a certificate cannot smuggle SQL through its own parameter list; the SQL text itself is restricted at build time to a fixed template set and validated at verify time against that set, so a hostile certificate cannot ask the verifier to run arbitrary statements. Outcome is `verified` or `failed` with a list of failed checks, and the CLI maps outcome to exit status (Requirements 22.9, 22.10, 26.3). The 30 second bound for 1000 Artifacts is met by batching the existence and digest checks into two set-based queries against a bound array parameter rather than one query per artifact (Requirement 22.11).
+The verifier connects with the reader role only (Requirements 22.8, 27.5). Embedded query parameters travel as bound parameters, never interpolated, so a certificate cannot smuggle SQL through its own parameter list.
+
+**The verifier trusts the certificate for a name and its parameters, and for nothing else.** Every admitted Verification_Query template lives in a fixed registry inside the verifier, each entry holding the documented SQL the certificate is expected to carry, the statement the verifier actually sends, the parameter count, whether the template is obligatory, and — the load-bearing part — the expectation. The expectation is the template's own fixed property rather than a field read from the payload, because a certificate that chose its own expectation would be choosing whether the completeness check was made at all. A name outside the registry, documented text that does not match the registry's, a parameter count that does not match, or a declared expectation that disagrees with the template's is reported as `query_template_unknown` and the entry is not run. An obligatory template that no entry presents is reported as `verification_query_missing`, because a check never made is a gap rather than a pass, and the obligatory set is derived from the registry rather than restated so the two cannot drift.
+
+Outcome is `verified` or `failed` with a list of failed checks, and the CLI maps outcome to exit status (Requirements 22.9, 22.10, 26.3). The failed checks are `signature_invalid`, `erasure_incomplete`, `query_template_unknown`, `verification_query_missing`, `count_disagreement`, `chain_mismatch`, `chain_tip_mismatch`, `checkpoint_signature_invalid`, `checkpoint_absent`, `checkpoint_unexplained_change`, `redaction_digest_mismatch`, and `artifact_still_present`. Separately from those, a report carries notes, and no note makes a verification fail: `recorded_count_derivation`, `historical_corroboration`, `checkpoint_disagreement_explained`, `checkpoint_is_not_the_latest_before_run`, `session_deleted_by_this_run`, and `session_tip_not_recorded`. A corroborating historical read that was deliberately not attempted names one of four reasons — `outside_gc_horizon`, `gc_horizon_unprobed`, `historical_read_refused`, or `run_records_no_after_instant` — so the absence of corroboration is legible rather than merely blank. The 30 second bound for 1000 Artifacts is met by batching the existence and digest checks into two set-based queries against a bound array parameter rather than one query per artifact (Requirement 22.11).
 
 Any single-byte alteration of the payload changes the canonical bytes and therefore the digest, so verification reports `signature_invalid` and exits non-zero (Requirements 22.3, 36.13, Property 12).
 
@@ -3615,7 +3798,7 @@ Where a caller needs the offending value, the class carries it as a structured a
 | Molt_MCP_Server loses the cluster | Molt_MCP_Server | Tool returns an empty result with an error note; the transport session stays open | A client agent proceeds uninformed rather than crashing | 32.7, 40.1 |
 | KMS unavailable | Certificate_Builder | Abort certificate creation, retain the Erasure_Run record, report the signing failure | Run evidence intact; no unsigned certificate is ever emitted | 32.5 |
 | S3 unavailable | Certificate_Builder | Signed certificate retained in the cluster with `storage_status = 'failed'`, failure reported | Certificate retrievable and verifiable | 21.15, 32.4 |
-| Backup fails | Backup_Manager and Erasure_Engine | Abort the run before any mutation, report the failure | No unbacked erasure occurs unless the operator passes the skip flag | 19.3, 19.4 |
+| Backup fails | Backup_Manager and Erasure_Engine | Record `status = 'aborted'` with the detail the backup path reported, then report the failure. The backup is secured before the working-tier purge, so no memory content of any tier has been mutated | No unbacked erasure occurs unless the operator passes the skip flag, and the aborted run row does not sit at `running` blocking the tenant's binding writes | 19.3, 19.4 |
 | Parameter_Store unavailable | any | `ConfigError` at startup naming the parameter, no fallback to a source constant or an environment default in production | No component runs on a stale or guessed credential | 30.2, 30.12 |
 | CloudWatch unavailable | Telemetry | Write the record to standard error and continue | No component fails because telemetry failed | 31.6 |
 | Serialization retries exhausted | Memory_Store | `SerializationExhausted` naming the transaction, `store.serialization_exhausted` metric | Caller decides; capture spools, erasure aborts the phase and leaves the run resumable | 15.5 |
@@ -3623,7 +3806,7 @@ Where a caller needs the offending value, the class carries it as a structured a
 
 ### Erasure run failure states
 
-A run that aborts mid-phase leaves `status = 'aborted'` with `phase` naming where it stopped and `error_detail` set. Evidence written so far is retained deliberately: the candidate set and the dispositions already recorded are the record of what was touched. No certificate is produced for an aborted run, and the CLI exits non-zero. A subsequent run for the same Client is a fresh run rather than a resumption, and it is correct by idempotence: already-deleted Artifacts are absent, already-redacted Artifacts no longer carry the erased Client's current attribution, and the new run sweeps only what remains.
+A run that aborts leaves `status = 'aborted'` with `phase` naming where it stopped and `error_detail` set, and the request the run answers follows it to `aborted`. This covers a failure before phase one as well as a failure inside one: the ownership record, the identity read, the backup, and the working purge each abort this way, so a prelude failure does not leave a run row at `running` refusing every binding write for that Client. The two exceptions are honest ones. A failure of the opening transaction leaves neither the request row nor the run row, so there is nothing to record an abort against and nothing at `running` either. And where the abort write is itself refused as stale, the refusal is recorded rather than raised over the failure that caused the abort — a superseded owner cannot mark its own run aborted, which is the fence working. Evidence written so far is retained deliberately: the candidate set and the dispositions already recorded are the record of what was touched, written by the owner that held the run at the time. No certificate is produced for an aborted run, and the CLI exits non-zero. A subsequent run for the same Client is a fresh run rather than a resumption, and it is correct by idempotence: already-deleted Artifacts are absent, already-redacted Artifacts no longer carry the erased Client's current attribution, and the new run sweeps only what remains.
 
 The lease is not released on an abort. It is left to expire, so a worker that crashed without running its abort path and a worker that aborted cleanly both release ownership on the cluster's clock rather than through a cleanup step that might not run. The cost is that the next run for that Client waits out at most one lease interval; the benefit is that there is no path by which a crashed worker holds ownership indefinitely and no path by which a cleanup routine releases a lease a live worker still holds (Requirement 44.6).
 
@@ -3972,7 +4155,9 @@ Nothing in the cluster references this file and no seeded row carries the owner 
 
 All randomness flows from one seeded generator, and every generated value derives from it in a fixed traversal order. Identifiers and timestamps are the only non-deterministic outputs: UUIDs come from the database or from a version-4 generator, and timestamps derive from the wall clock at generation. The determinism test generates twice with the same seed and asserts equality of content after replacing identifiers and timestamps with positional placeholders (Requirements 28.8, 28.9).
 
-`--reset` truncates the seeded Clients' data before generating, so repeated seeding does not accumulate. It refuses to run when any non-seeded Client exists unless `--yes` is passed, so a seed command cannot quietly destroy real engagement data.
+`--reset` removes no row. The verb accepts the flag, warns that it removes nothing in this build and that an empty corpus is the way to seed cleanly, and then generates exactly as it would without the flag, so repeated seeding accumulates. Nothing in the verb inspects whether a non-seeded Client exists either, so no confirmation is asked for and none is needed: the seed path adds rows and deletes none.
+
+Truncating the seeded Clients' data was not implementable while the Session and Ledger tables referenced each other. A Session named the Event that spawned it and every Event named the Session it was recorded in, so neither side of the pair could be removed first and no delete order over the two tables existed — the same cycle the erasure path ran into. Migration 017 removed that obstacle by dropping the Session's spawning-Event reference, and the truncation has not been built on top of it. Until it is, the flag is a warning and nothing more.
 
 ---
 

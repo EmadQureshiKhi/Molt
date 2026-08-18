@@ -144,12 +144,18 @@ Two smaller groups complete the picture, and neither is an oversight.
 
 References declared with no explicit action — the Session and Client references on
 `ledger`, the Client references on `session`, `derived_artifact`, `client_binding`,
-`erasure_lease`, `policy_rule`, and `working_memory`, the self-references on
-`session` and `ledger`, and the rule references on `policy_match` and
-`approval_queue` — carry the platform's default, which also refuses a delete that
-would orphan a row. Migration 013 restates only those references where the refusal
-is itself an audit guarantee, so the protected set is readable in one file under
-one naming convention rather than inferred from the absence of a clause.
+`erasure_lease`, `policy_rule`, and `working_memory`, and the rule references on
+`policy_match` and `approval_queue` — carry the platform's default, which also
+refuses a delete that would orphan a row. Migration 013 restates only those
+references where the refusal is itself an audit guarantee, so the protected set is
+readable in one file under one naming convention rather than inferred from the
+absence of a clause.
+
+Three references the first migration generation declared are no longer enforced at
+all, which is why the lineage self-references on `session` and `ledger` are absent
+from that list. Their columns still hold their values and the indexes over them
+still stand; what the cluster no longer does is refuse a delete that would leave one
+dangling. The subsection after next says why each had to give way.
 
 Four columns deliberately carry no reference at all:
 
@@ -168,6 +174,45 @@ The two supersessions this argument covers are drawn out: the lease case in
 case in [`assets/molt-attribution-timeline.svg`](../assets/molt-attribution-timeline.svg).
 Both figures also carry the absences on the right, so the reason a constraint is missing
 sits beside the thing it would otherwise have guarded.
+
+### Dropped: the reference stood between an authorised erasure and its own subject
+
+Migration 017 drops three references the core migration declared. This is the same
+argument as the `disposition.artifact_id` row above, reached from the other
+direction: there the reference was never declared, here it was declared and had to
+be removed once the erasure path was built against it.
+
+| Referencing table | Column | Referenced | Constraint dropped | Why it had to give way |
+| --- | --- | --- | --- | --- |
+| `session` | `spawning_event_id` | `ledger (id)` | `session_spawning_event_fk` | A sub-agent Session names the Event that spawned it, and every Event names the Session it was recorded in. The Event may not go before the Session and the Session may not go before its own Events, so the pair is a cycle for deletion and one of the two has to give |
+| `session` | `parent_session_id` | `session (id)` | `session_parent_session_id_fkey` | A tenant's Session tree is removed whole, and a batch boundary cuts across it wherever the candidate ordering puts the parent. Requiring a child to be removed alongside or before its parent is a requirement no batching can honour |
+| `ledger` | `parent_event_id` | `ledger (id)` | `ledger_parent_event_id_fkey` | A result names the call it answers, and the call and its result belong to one Session and leave together, so the same batch-boundary argument applies unchanged |
+
+What is dropped is the enforcement and not the column. Every dropped column keeps
+the value it holds, the index over each of them stays, and the derivation graph is
+carried independently in `lineage_edge`, which is where a reader follows provenance
+from in any case. No lineage becomes unreadable; what goes is the cluster's refusal.
+
+`ledger.session_id` is the fourth reference of that group and it stays enforced,
+which is worth saying because it shows the line is drawn by cycle and not by
+convenience. It forbids an orphan Event — an Event belonging to a Session that does
+not exist records nothing a reader can use — and it sits in no cycle, because no
+Session is ever required to outlive an Event through it. It is satisfiable by
+ordering alone, and the disposition phase orders for it: the hard delete sorts its
+decisions so that every Event is removed in an earlier batch than, or the same batch
+as, any Session. So it costs nothing to keep. `ledger.client_id` stays for the
+opposite reason: a tenant's Client row is what the erasure was requested for and
+what its evidence is filed against, so it outlives the memory it owned and nothing
+about a governed deletion asks this reference to give way.
+
+One invariant the two Session references were carrying is not theirs to take with
+them, and it moved rather than lapsing. A Session naming a parent no `session` row
+holds, or a spawning Event no `ledger` row holds, is refused by the write path
+itself: `src/molt/store/sessions.py` guards the inserting statement so that a named
+row which cannot be found leaves the statement selecting nothing, and reports that
+as a missing parent. The refusal is inside the inserting transaction, so it cannot
+race a concurrent delete, and it is not a reference, so an authorised erasure is
+free to remove either half of the pair.
 
 ## The privilege half of the same protection
 

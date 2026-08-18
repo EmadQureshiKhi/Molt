@@ -13,8 +13,13 @@ deployment topology. The overview is at
 explanation; the diagram is the map.
 
 Read this document alongside the [status section of the README](../README.md#status).
-Several components described here are designed and partly written but have not cleared
-their verification checkpoint, and the tables below say which.
+Every component in the tables below is written, and the whole sequence has been run as
+one history against a live instance by `tests/e2e/test_full_flow.py` — seed, signed
+ingest, recall, the threshold grid, a signed checkpoint, a leased erasure run,
+certificate issue, and independent verification. What is outstanding is deployment, not
+component completion: no stack has been created, so nothing here has been exercised in a
+cloud account. Where a component carries a named residue rather than a clean state, the
+table says so in its own row and [`reviews.md`](reviews.md) carries the finding.
 
 ## Why the shape is what it is
 
@@ -72,24 +77,24 @@ Grouped by where the component runs, because that is also where its trust bounda
 | Binding_Detector | Creates and supersedes client attribution at ingest | Built |
 | Recall_Engine | Answers the agent's pre-action query under a tenancy filter applied inside SQL | Built |
 | Confidence_Tracker | Records procedure retrievals and outcomes and moves procedure confidence with them | Built |
-| Lease_Manager | Granting, renewing, and transferring erasure leases, and owning the fencing generation per client, so exactly one worker owns an erasure at a time | Built; fenced writes not yet wired into every evidence path |
+| Lease_Manager | Granting, renewing, and transferring erasure leases, and owning the fencing generation per client, so exactly one worker owns an erasure at a time | Built. Every evidence write the erasure engine sends carries the generation, the completion included; the one write the fence does not yet reach is the residue detector's own per-finding recording, which frames its own transactions |
 | Residue_Detector | Finds semantic residue by vector similarity | Built |
 | Adjudicator | Asks the text provider to decide the borderline residue band, failing closed | Built |
 | Redaction_Rewriter | Performs surgical redaction of a blended artifact and validates the result | Built |
 | Backup_Manager | Secures pre-erasure backup evidence by either path | Built |
-| Erasure_Engine | The three phases and their transaction boundaries | Phases built; orchestration under a held lease unfinished |
-| Sensitivity_Analyzer | Evaluates the residue candidate set across a threshold grid and reports the consequence of each pair, read-only | In progress |
-| Certificate_Builder / Certificate_Verifier | Assembly, canonicalisation, signing, storage; and independent verification against a retrieved public key | In progress |
+| Erasure_Engine | The three phases and their transaction boundaries | Built, orchestration included: ownership before the first mutation, renewal beside every phase, each phase's evidence in its own transaction with the phase marker, idempotent finalisation, and a dry-run path that mutates no memory content |
+| Sensitivity_Analyzer | Evaluates the residue candidate set across a threshold grid and reports the consequence of each pair, read-only | Built |
+| Certificate_Builder / Certificate_Verifier | Assembly, canonicalisation, signing, storage; and independent verification against a retrieved public key | Built |
 | Checkpoint_Signer | Computes, signs, stores, and verifies ledger checkpoints, including accounted and unaccounted disagreement | Built |
 | Policy_Watcher | Consumes the write stream, evaluates rules, owns the kill switch and the approval queue | Built |
 | Retention_Manager | Configures and reports database-enforced retention | Built |
-| Molt_MCP_Server | Exposes memory to any MCP-compatible client as read-only tools over both transports | In progress |
-| Web_Console | The demonstration application, its routes, and its read-only mode | Not started |
-| CLI | The `molt` argument tree, one module per verb | Not started |
-| Seed_Generator | Multi-client seed data including deliberate cross-client contamination | In progress |
+| Molt_MCP_Server | Exposes memory to any MCP-compatible client as read-only tools over both transports | Built: the tool registry is `src/molt/mcpserver/tools.py` and both transports sit beside it. The HTTP transport authenticates no caller, which is an accepted finding rather than an omission |
+| Web_Console | The demonstration application, its routes, and its read-only mode | Built: fourteen modules under `src/molt/console/routes/`, of which twelve are the registered view modules the package's import list names, and seventeen templates under `web/templates/`. Demonstration mode is middleware ahead of routing rather than a per-handler check |
+| CLI | The `molt` argument tree, one module per verb | Built: thirteen verbs, one of them two words, each with its own module under `src/molt/cli/verbs/` |
+| Seed_Generator | Multi-client seed data including deliberate cross-client contamination | Built |
 | Telemetry | Metrics and structured logs, with credential fields filtered | Surface built, integration pending |
 | Provisioner | Cluster, role, and service-account creation, and the capability probes | Built |
-| Auditor_Gateway | Read-only auditor access through the managed MCP endpoint | Not started |
+| Auditor_Gateway | Read-only auditor access through the managed MCP endpoint | Built as provisioning rather than as a service: `scripts/provision_roles.sh` creates a per-auditor login with an expiry, a schema of its own, and client-filtered views, and [`auditor.md`](auditor.md) documents the surface it actually creates. Three discrepancies between that function and the requirements are open findings in [`reviews.md`](reviews.md) |
 
 Four of those components exist specifically to answer an obligation that would
 otherwise rest on convention: the lease manager (exactly one owner, provably), the
@@ -236,8 +241,9 @@ Two residues are worth stating rather than glossing:
   per-request nonce table would close it and would also put a write-contended row in
   front of every capture, so the residue is accepted deliberately.
 
-The full set of threats, mitigations, and accepted residues belongs in
-`docs/threat-model.md`, which is not yet written.
+The full set of threats, mitigations, and accepted residues is in
+[`threat-model.md`](threat-model.md): seven named threats, each mitigation, and the
+three accepted in part.
 
 ## Four platform facts that were probed, not assumed
 

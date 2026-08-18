@@ -199,7 +199,7 @@ These govern every task below and are not repeated per task.
     - Create `tests/integration/test_privileges.py` asserting no role holds `UPDATE` on `ledger`, the eraser holds `DELETE` and not `UPDATE`, the reader holds `SELECT` only, the writer's `UPDATE` on `client_binding` is column-scoped, and migration re-application changes no state
     - _Requirements: 7.6, 10.3, 10.12, 27.2, 27.9, 29.6, 30.4, 36.2, 37.15, 43.9_
 
-- [x] 6. Write the second schema migration generation, 008 through 014
+- [x] 6. Write the second schema migration generation, 008 through 022
   - [x] 6.1 Write migration 008 for bitemporal attribution
     - Write `src/molt/store/migrations/008_attribution.sql` adding the validity start, validity end, and superseding reference columns to `client_binding` with `IF NOT EXISTS`, dropping `binding_unique_pair`, and creating the partial unique index `binding_current_unique` over unsuperseded versions only so a history accumulates while exactly one version stays current per Artifact and Client pair
     - Add the total closure check pairing validity end with the superseding reference, the ordered-interval check, and the `binding_as_of` index on artifact and descending validity bounds storing client, method, confidence, and the superseding reference so the as-of query is an index range with no row fetch
@@ -244,7 +244,7 @@ These govern every task below and are not repeated per task.
     - Revoke `DELETE` on every audit-evidence table from the eraser role, and revoke `UPDATE` and `DELETE` on both checkpoint tables from every role
     - _Requirements: 27.3, 27.4, 27.5, 44.1, 45.9, 46.5, 49.14_
 
-  - [x] 6.9 Write migration 015 for the structural diff summary a redaction leaves
+  - [x] 6.8 Write migration 015 for the structural diff summary a redaction leaves
     - Write `src/molt/store/migrations/015_diff_summary.sql` adding the nullable `removed_segments` and `retained_segments` counts to `disposition`, so the redaction comparison view is a query over stored evidence rather than a re-read of a body one side of which no longer exists
     - Keep both columns counts and never text, because a stored diff or a stored list of removed segments would be a copy of the pre-redaction body under another name, and the Disposition table is the one place no body may land
     - Admit absence on both columns, because a hard delete and a retention summarise no rewrite, so a zero there would claim a rewrite dropped nothing rather than record that no rewrite happened
@@ -252,17 +252,36 @@ These govern every task below and are not repeated per task.
     - Grant nothing: the table's privileges are already carried by migration 014, and a column added to an existing table is covered by that table-level grant
     - _Requirements: 18.2, 18.5, 49.14_
 
-  - [x]* 6.8 Write schema and privilege introspection tests for the second generation
+  - [x]* 6.9 Write schema and privilege introspection tests for the second generation
     - Create `tests/integration/test_schema_shape_amended.py` asserting the partial `binding_current_unique` index exists and the total pair constraint is gone, the `binding_as_of` index carries its stored columns, the lease current-uniqueness and idempotency indexes exist, `ledger_checkpoint` and `checkpoint_session` exist with no TTL configured, `working_memory` carries the 3600 second expiry default and an hourly TTL job, the confidence equivalence check rejects a Summary carrying a confidence and a Learned_Procedure carrying none, and `artifact_ref` names no working table
     - Assert the Row-Level TTL storage parameters are actually present on `working_memory` by reading the table descriptor back rather than by trusting the configuring statement's outcome, covering the expiration expression, the hourly job cron, and the delete batch size
     - Record the failure mode the read-back guards: setting Row-Level TTL on a table created earlier in the same transaction reports success and commits with the parameters silently absent, leaving a tier that expires no row
     - Create `tests/integration/test_privileges_amended.py` asserting the eraser holds no `DELETE` on any audit-evidence table, no role holds `UPDATE` or `DELETE` on either checkpoint table, the writer's `UPDATE` on `derived_artifact` is confined to the confidence column, and the eraser's `UPDATE` on `erasure_lease` reaches neither owner nor generation
     - _Requirements: 14.7, 14.8, 36.2, 42.9, 42.12, 44.2, 45.9, 45.10, 46.5, 49.1, 49.14_
 
-  - [x]* 6.9 Write the referential action integration tests
+  - [x]* 6.10 Write the referential action integration tests
     - Create `tests/integration/test_referential_restrict.py` asserting that deleting an Erasure_Run row referenced by a Disposition record is refused with the referencing table name and the referencing row count and that the Disposition record remains present, and covering the same refusal for the request, candidate, residue, run-session, backup, certificate, audit-snapshot, lease, and checkpoint-session references
     - Create `tests/integration/test_referential_cascade.py` asserting that deleting a Derived_Artifact row removes that Artifact's Embedding rows and Lineage_Edges by cascade and that deleting a Session removes its Working_Memory rows
     - _Requirements: 46.1, 46.2, 46.3, 46.6, 46.7_
+
+  - [x] 6.11 Write migration 016 for the two reads the read-only role was never granted
+    - Write `src/molt/store/migrations/016_reader_grants.sql` granting the reader role `SELECT` on `erasure_candidate` and `run_session`, the two tables read-only code genuinely reads that fell between the grant list of 007 and the grant list of 014
+    - State in the migration that the Sensitivity_Analyzer's residue walk reads the candidate set twice and refuses any role but the read-only one, so the missing privilege is not a shortfall a caller works around by connecting differently
+    - State that the Certificate_Verifier joins `run_session` on the deletion arm of the checkpoint accounting query, so the absence of the grant makes every certificate naming a Ledger_Checkpoint unverifiable
+    - Grant `SELECT` and nothing further on both tables, because the record of an erasure is evidence and evidence a reader could edit would be worth as little as a certificate a reader could sign
+    - Need no guard for re-runnability, and state that in the file: a repeated `GRANT` on this cluster is re-issuable with no second effect
+    - Carry the grants in a new file rather than in the grant list they belong to, because the runner refuses a run when a recorded digest no longer matches its file
+    - _Requirements: 22.8, 27.5, 27.9, 45.8, 48.5_
+
+  - [x] 6.12 Write migration 017 for the references an authorised erasure has to be able to cut
+    - Write `src/molt/store/migrations/017_erasure_references.sql` dropping the Session's spawning Event reference, the Session's parent reference, and the Event's answering-parent reference, each drop guarded so re-application is a clean no-op and each naming both spellings the constraint may carry where the platform may have generated one
+    - Keep every dropped column and every index over it, and state in the migration that what goes is the cluster's refusal rather than the record, since the derivation graph is carried independently in `lineage_edge`
+    - State the reason in the migration: a sub-agent Session names the Event that spawned it and every Event names the Session it was recorded in, so the pair is a cycle no delete order satisfies, and the two self-references are the same problem inside one table across a batch boundary
+    - Leave `ledger.session_id` and `ledger.client_id` enforced, and state why each costs nothing to keep: neither sits in a cycle, and the first is satisfiable by ordering alone
+    - Order the hard delete's decisions so that every Event is removed in an earlier batch than, or the same batch as, any Session, with a stable sort so every other Artifact kind keeps the relative order it arrived in
+    - Keep the absent-parent refusal by moving it into the write path: guard the inserting Session statement with a join per named row so a parent or spawning row that cannot be found leaves the statement selecting nothing, reported as a missing parent from inside the inserting transaction
+    - Carry each statement in a transaction of its own, because a guarded drop naming a constraint an earlier application already removed is checked against state that transaction has not yet been shown
+    - _Requirements: 9.7, 18.1, 27.2, 27.13, 46.4, 46.9_
 
 - [x] 7. Implement the Memory_Store data-access layer
   - [x] 7.1 Implement connection handling and the serializable retry wrapper
@@ -873,7 +892,7 @@ These govern every task below and are not repeated per task.
     - Create `tests/integration/test_residue_ground_truth.py` asserting the Residue_Detector recovers every planted fragment recorded in the ground-truth mapping, using the mapping only to check the answer and never to seed the query. It sits in the instance-backed suite for the same reason the contamination assertions do: the recovery is a vector search against a live corpus
     - _Requirements: 36.14, 48.4_
 
-- [ ] 26. Implement the Web_Console
+- [x] 26. Implement the Web_Console
   - [x] 26.1 Implement the application skeleton, the Lambda adapter, authentication, the health route, and the specification route
     - Write `src/molt/console/app.py`, `auth.py`, `deps.py`, and `lambda_adapter.py` with the Starlette application, a small ASGI-to-Lambda adapter so the same application object is served locally by the serve verb and by the deployed function, the operator credential verified by constant-time comparison against a hash read from Parameter_Store, a signed HttpOnly, Secure, SameSite=Strict cookie with absolute expiry, per-session CSRF tokens on mutation routes, and the unauthenticated health route reporting status, database reachability, the capability record summary, the demo flag, and no memory content
     - Add the unauthenticated specification route serving the tracked Interface_Specification document from the documentation directory verbatim with the appropriate content type, reading no table and returning no memory content
@@ -886,12 +905,12 @@ These govern every task below and are not repeated per task.
     - _Requirements: 8.6, 11.5, 11.6, 25.2, 25.3, 25.11_
 
   - [x] 26.3 Implement the residue view and the erasure console with durable phase streaming
-    - Write `src/molt/console/routes/residue.py` and `routes/erase.py` with the residue view, the erasure console, the run-start route recording the run and returning the run identifier immediately, and the stream route sourced from the durable phase marker and the disposition and residue candidate rows rather than from process memory, so a late or reconnecting client receives current state under a request-scoped function host, terminating with an explicit terminal event carrying the outcome
+    - Write `src/molt/console/routes/residue.py` and `routes/erasure.py` with the residue view, the erasure console, the run-start route recording the run and returning the run identifier immediately, and the stream route sourced from the durable phase marker and the disposition and residue candidate rows rather than from process memory, so a late or reconnecting client receives current state under a request-scoped function host, terminating with an explicit terminal event carrying the outcome
     - Write `web/templates/residue.html` and `erase.html` with a native select for the Client, native number inputs for thresholds, a form button to start, and a polite live region that does not move focus
     - _Requirements: 25.4, 25.5, 25.11_
 
-  - [ ] 26.4 Implement the run detail, redaction comparison, certificate, retention, and approval views
-    - Write `src/molt/console/routes/evidence.py` and `routes/approvals.py` with the run detail view, the redaction comparison view, the certificate display, the live verification trigger, the retention view, and the approval queue list and resolution routes
+  - [x] 26.4 Implement the run detail, redaction comparison, certificate, retention, and approval views
+    - Write `src/molt/console/routes/runs.py` (run detail and redaction comparison), `routes/certificates.py` (certificate display and the live verification trigger), `routes/retention.py` (the retention view), and `routes/approvals.py` (the approval queue list and its resolution route). Delivered as four modules rather than the two the wording names: each claims its own routes from the route table, and the certificate module is the only one of the four that reads through the read-only handle for a reason of its own — the Certificate_Verifier refuses a connection whose role can write, so the verification trigger cannot run on the eraser handle the console function holds
     - Write the matching templates; the redaction view shows the post-redaction body, both digests, the binding sets before and after, the stored structural diff summary, and an explicit statement that the original text was not retained
     - Show the certificate's ownership generation, first-attribution field, and named checkpoint alongside the verification outcome, so the new evidence fields are observable rather than only stored
     - _Requirements: 18.8, 23.10, 25.6, 25.7, 25.8, 43.7, 44.11, 45.11_
@@ -907,12 +926,12 @@ These govern every task below and are not repeated per task.
     - Replay a completed seeded run through the same streaming view so phase streaming, the redaction comparison, and certificate verification remain observable without a mutation route
     - _Requirements: 25.5, 25.6, 25.7, 25.12_
 
-  - [ ]* 26.7 Write property test for route-table authentication, demonstration containment, and specification coverage
+  - [x]* 26.7 Write property test for route-table authentication, demonstration containment, and specification coverage
     - **Property 38: Route-table authentication and demonstration-mode containment**
     - **Validates: Requirements 25.9, 25.10, 25.12, 30.5, 51.4**
     - Create `tests/property/test_p38_route_auth.py` with the `route_requests()` generator enumerating the application's own route table from the ASGI object the deployed function serves, crossed with authenticated, unauthenticated, and demonstration contexts, and crossed with the parsed Interface_Specification, asserting 401 or 403 outside the public allowlist, no memory-content key in the health body or the specification body, every declared route present in the specification, and 403 on every mutation route in demonstration mode
 
-  - [ ]* 26.8 Write the console template and accessibility tests
+  - [x]* 26.8 Write the console template and accessibility tests
     - Create `tests/unit/test_console_templates.py` asserting every interactive control in the rendered erasure console carries a programmatically determinable name, that no control is a bare container with a handler, that the streaming region is a live region, and that the sensitivity grid renders inapplicable cells with their reason and the procedures view marks below-floor procedures as retained
     - Assert the Memory_Tier view renders one row per tier each carrying a text label, that the `working` tier row carries its expired-count cell and its next-sweep cell, and that the tier mapping module and the rendered view name the same tier set
     - _Requirements: 25.11, 25.15, 42.20, 48.8, 49.16_
@@ -921,7 +940,7 @@ These govern every task below and are not repeated per task.
     - Write `src/molt/console/routes/tiers.py` reading the tier mapping module and issuing one `COUNT(*)` statement per tier inside one read-only transaction, opening no write transaction, with every count derived at request time rather than from a cached or precomputed value
     - Add for the `working` tier the count of resident rows whose expiry timestamp precedes the cluster's current timestamp, and the interval remaining until the next Row-Level TTL job run computed from the TTL job cron storage parameter read back from the table's own configuration rather than from a hardcoded value or a configuration key
     - Write `web/templates/tiers.html` rendering one row per tier with a text label per tier and no colour-only encoding, mutability and capability as prose cells, and the working tier's expired-resident count and next-sweep interval in their own labelled cells
-    - The view is available in read-only demonstration mode because it opens no write transaction and connects with the reader role, so the mutation denylist has nothing to block on it
+    - The view is available in read-only demonstration mode because it opens no write transaction and connects with the reader role, so the mutation denylist has nothing to block on it. Delivered through `Console.read_only_store()`, which is the reader connection wherever the deployment provisions one — the delivered console does — and the primary connection where it provisions none, so a single-connection local run keeps the view rather than losing it to a privilege the view never depended on. The read-only transaction stands either way, and `tests/unit/test_console_read_only_handles.py` refuses any console module that writes nothing and still reaches for the wider handle
     - _Requirements: 25.15, 42.16, 42.17, 42.18, 42.19, 42.20_
 
 - [x] 27. Implement the command-line interface
@@ -953,8 +972,8 @@ These govern every task below and are not repeated per task.
     - _Requirements: 31.1, 31.3, 31.5, 32.7_
 
   - [x]* 28.3 Write telemetry unit and CloudWatch service integration tests
-    - Create `tests/unit/test_telemetry_filter.py` asserting content bodies, credential values including model provider credentials and the ingress signing secret, and vectors are dropped and that the four fixed keys are always present
-    - Create `tests/integration/services/test_cloudwatch_emission.py` asserting a live batched metric put and the standard-error fallback on failure
+    - Create `tests/unit/test_telemetry_cardinality.py` asserting content bodies, credential values including model provider credentials and the ingress signing secret, and vectors are dropped and that the four fixed keys are always present
+    - Create `tests/integration/services/test_cloudwatch.py` asserting a live batched metric put and the standard-error fallback on failure
     - _Requirements: 31.2, 31.4, 31.6, 36.15, 37.12_
 
 - [x] 29. Implement provisioning scripts and infrastructure definitions
@@ -988,7 +1007,7 @@ These govern every task below and are not repeated per task.
     - Create `tests/integration/services/test_parameter_store.py` covering standard-tier parameter retrieval and operator credential file retrieval, `tests/integration/services/test_ccloud_backup.py` covering the primary `BACKUP INTO` path, Managed_Backup listing for the fallback, and the audit-log pull, and `tests/integration/services/test_managed_mcp.py` covering Managed MCP Server connectivity under the read-only role
     - _Requirements: 19.1, 19.6, 24.1, 27.8, 27.11, 30.2, 30.12, 36.15_
 
-- [ ] 30. Checkpoint - full system wired
+- [x] 30. Checkpoint - full system wired
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 31. Write and enforce the Interface_Specification
@@ -1004,8 +1023,8 @@ These govern every task below and are not repeated per task.
     - Create `tests/spec/test_served_specification.py` asserting the served specification body equals the tracked document and contains no memory content
     - _Requirements: 51.4, 51.10, 51.11_
 
-- [ ] 32. Complete the end-to-end, security, and performance coverage
-  - [ ]* 32.1 Write the end-to-end test
+- [x] 32. Complete the end-to-end, security, and performance coverage
+  - [x]* 32.1 Write the end-to-end test
     - Create `tests/e2e/test_full_flow.py` executing seed, capture with a signed ingest request, recall showing a confidence-weighted procedure, a sensitivity analysis, a checkpoint computation, a leased erase, certify, and verify in sequence against a running instance, asserting the certificate verifies, that its counts are confirmed through the derived mechanism so the run does not depend on the garbage-collection horizon, and that its ownership generation, named checkpoint, first-attribution field, and working-rows-deleted count all agree with the database
     - _Requirements: 20.2, 36.12, 42.13, 43.7, 44.11, 45.11, 47.1, 48.9_
 
@@ -1017,10 +1036,10 @@ These govern every task below and are not repeated per task.
   - [x]* 32.3 Write the remaining security and regression tests
     - Create `tests/security/test_route_authentication.py` asserting every network-exposed route other than the named health and specification routes requires authentication
     - Create `tests/security/test_credential_absence.py` scanning every tracked file for credential, connection string, bearer token, private key, ingress signing secret, and model provider credential shapes
-    - Create `tests/security/test_provider_credential_render.py` asserting a loaded provider credential renders as the fixed placeholder in every log record, exception message, error detail, and output stream on the real emission path
+    - Create `tests/unit/test_provider_credential_render.py` asserting a loaded provider credential renders as the fixed placeholder in every log record, exception message, error detail, and output stream on the real emission path
     - _Requirements: 30.1, 30.5, 30.12, 37.12, 51.4_
 
-- [ ] 33. Write the documentation deliverables
+- [x] 33. Write the documentation deliverables
   - [x] 33.1 Write the README and the architecture documentation
     - Write `README.md` describing the problem, the architecture, each CockroachDB tool used and what Molt does with it, each AWS service used and what Molt does with it, and the demonstration URL at the CDN distribution's generated hostname
     - Write `docs/architecture.md` and `docs/architecture.svg` showing capture, the CockroachDB memory core across its six tiers, the erasure engine with its lease ownership, the provider abstraction, the Molt_MCP_Server, and the AWS services
@@ -1060,7 +1079,7 @@ These govern every task below and are not repeated per task.
     - Write `docs/hygiene.md` recording the pattern classes, the denylist and allowlist rationale, and the reason the denylist file is the only path excluded from its own scan
     - _Requirements: 29.4, 29.8, 50.3, 50.9_
 
-  - [ ] 33.9 Write the cost record, reviews record, traceability table, and recording script
+  - [x] 33.9 Write the cost record, reviews record, traceability table, and recording script
     - Write `docs/cost.md` stating a maximum monthly cost for the delivered configuration, with a table naming each service, its estimated monthly consumption, and its estimated monthly cost, plus the measured storage footprint, the measured request-unit consumption, the measured prompt-cache hit ratio and the resulting cost per Erasure_Run, and the note that cluster consumption is covered by introductory credits rather than a perpetual free tier and that Fargate, per-secret secret storage, and asymmetric key storage carry no perpetual free tier
     - Write `docs/reviews.md` recording the schema and query reviews conducted with the Agent Skills material and the changes those reviews produced, `docs/traceability.md` mapping each judging criterion to the requirements that address it, and `docs/demo.md` as a recording script of at most three minutes covering capture on two machines, semantic recall changing an agent decision, residue detection, an Erasure_Run, and certificate verification
     - _Requirements: 27.10, 33.5, 33.6, 33.9, 35.9, 35.10, 38.6_
@@ -1070,7 +1089,7 @@ These govern every task below and are not repeated per task.
     - Create `tests/spec/test_glossary_coverage.py` asserting every component name the design and the README use appears in the glossary, so a component added without a definition is a failure rather than a gap a reader discovers
     - _Requirements: 29.4, 29.5, 29.8, 51.5_
 
-- [ ] 34. Final checkpoint - full plan verified
+- [x] 34. Final checkpoint - full plan verified
   - Ensure all tests pass, the four static checks report clean, the hygiene check exits 0 over the whole tree, and every property test from Property 1 through Property 40 is present and passing; ask the user if questions arise.
 
 ## Notes
@@ -1094,8 +1113,8 @@ These govern every task below and are not repeated per task.
     { "id": 3, "tasks": ["1.7", "1.8", "2.2", "2.5", "2.6", "2.7", "2.9", "2.10", "4.1", "5.1"] },
     { "id": 4, "tasks": ["4.2", "4.3", "4.4", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7"] },
     { "id": 5, "tasks": ["4.5", "5.8", "6.1", "6.2", "6.3", "6.4", "6.5"] },
-    { "id": 6, "tasks": ["6.6", "6.7", "7.1"] },
-    { "id": 7, "tasks": ["6.8", "6.9", "7.2", "7.5", "7.8", "7.11", "7.12"] },
+    { "id": 6, "tasks": ["6.6", "6.7", "6.11", "6.12", "7.1"] },
+    { "id": 7, "tasks": ["6.8", "6.9", "6.10", "7.2", "7.5", "7.8", "7.11", "7.12"] },
     { "id": 8, "tasks": ["7.3", "7.4", "7.6", "7.7", "7.9", "7.10", "7.13", "7.17"] },
     { "id": 9, "tasks": ["7.14", "7.15", "7.16", "8.1", "8.5", "8.6"] },
     { "id": 10, "tasks": ["8.2", "8.3", "8.4", "8.7", "10.1", "10.3", "10.5", "10.7", "12.1", "12.3"] },
