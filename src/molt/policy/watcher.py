@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 from uuid import UUID
 
 from molt.config.resolve import Configuration
@@ -103,6 +103,7 @@ __all__ = [
     "persist_mode",
     "read_watermark",
     "route_answer",
+    "store_opener",
     "write_watermark",
 ]
 
@@ -245,6 +246,17 @@ _NANOSECONDS: Final[Decimal] = Decimal(10) ** 9
 
 # The sleeper a caller may replace so a test waits for nothing.
 Sleeper = Callable[[float], None]
+
+
+def _first_line(error: BaseException) -> str:
+    """The first line of a failure's message, or its type when it carries none.
+
+    A cluster refusal arrives as several lines, of which the first states what was refused
+    and the rest restate the statement. Only the first belongs in a log record, which is one
+    field of one line by construction.
+    """
+    lines = str(error).strip().splitlines()
+    return lines[0].strip() if lines else type(error).__name__
 
 
 class ChangefeedRejectedError(StoreError):
@@ -491,10 +503,18 @@ class DedicatedStream:
         except StopIteration:
             self._cursor = opened
             self._rows = None
+        # The cause is named in the message rather than only chained. The refusal is caught
+        # by the start path, which records a capability, counts a degradation, and logs the
+        # reason -- and the reason it logged was this sentence, so every cause arrived as the
+        # same six words. A cluster that will not serve the statement and a connection that
+        # could not be opened to ask are different problems with different repairs, and one
+        # of them was a missing table read that went unnoticed for as long as the statement
+        # had existed precisely because the message never varied.
         except Exception as error:
             self.close()
             raise ChangefeedRejectedError(
-                "the cluster would not serve the sinkless change stream"
+                "the sinkless change stream was not opened: "
+                f"{type(error).__name__}: {_first_line(error)}"
             ) from error
         else:
             self._cursor = opened
@@ -530,6 +550,26 @@ class DedicatedStream:
                 cursor.close()
         with suppress(Exception):
             self._connection.close()
+
+
+def store_opener(store: MemoryStore) -> StreamOpener:
+    """An opener over connections of the store's own, taken outside its pool.
+
+    This is the opener a deployment uses, and the one `Watcher.from_configuration` defaults
+    to. It exists as a named function rather than inline at the call site because it is where
+    one narrowing is performed and explained.
+
+    The store's connection protocol describes the pooled statement path, which has no
+    streaming cursor in it; the driver's own cursor does have one, and the stream consumes it.
+    So the narrowing is a statement about the driver rather than a widening of the store's
+    protocol — widening it would oblige every other consumer of a connection to satisfy a
+    member none of them uses.
+    """
+
+    def connect_with() -> StreamingConnection:
+        return cast(StreamingConnection, store.open_dedicated())
+
+    return dedicated_opener(connect_with)
 
 
 def dedicated_opener(connect_with: Callable[[], StreamingConnection]) -> StreamOpener:
@@ -653,12 +693,30 @@ class Watcher:
         clock: Clock = system_clock,
         sleep: Sleeper = time.sleep,
     ) -> Watcher:
-        """Build a watcher whose rule set and intervals both come from the surface."""
+        """Build a watcher whose rule set, intervals, and stream all come from the surface.
+
+        The opener defaults to one that opens a connection of the store's own outside its
+        pool, which is what a sinkless stream requires and what makes the primary mechanism
+        the mechanism a deployment actually gets.
+
+        It defaulted to nothing, and the consequence was invisible for as long as the module
+        existed. A watcher with no opener refuses its own stream before the cluster is asked
+        — `_open_stream` raises when the opener is absent — and that refusal is caught by the
+        same handler that catches a refusal from the cluster, recorded as the `changefeed`
+        capability being unavailable, and logged. So every deployed watcher ran the timestamp
+        poll, reported the stream as unavailable, and the deployment's own documentation
+        concluded from that record that the cluster's plan did not serve one. The cluster
+        served it the whole time. Nothing had ever asked.
+
+        A caller may still pass its own, which is what the tests do: the seam exists so both
+        the primary path and a refusal are exercisable without a cluster deciding which
+        happens.
+        """
         return cls(
             store,
             load_rules(configuration),
             settings=WatcherSettings.from_configuration(configuration),
-            opener=opener,
+            opener=store_opener(store) if opener is None else opener,
             clock=clock,
             sleep=sleep,
         )
@@ -684,6 +742,19 @@ class Watcher:
     def stopped(self) -> bool:
         """Whether the loop has been stopped."""
         return self._stopped
+
+    @property
+    def can_open_stream(self) -> bool:
+        """Whether this watcher has the means to open a stream at all.
+
+        False means the poll is the only mechanism available to it, whatever the cluster
+        would serve, because no opener was supplied. That is worth being able to ask
+        separately from what the cluster said: a watcher that cannot ask and a cluster that
+        refuses both end in the poll, and for a long while they were indistinguishable from
+        outside — which is how a missing default came to be documented as a limitation of the
+        cluster's plan.
+        """
+        return self._opener is not None
 
     def health(self) -> WatcherHealth:
         """The mode and the last consumed mutation's timestamp, for either route."""
@@ -712,9 +783,13 @@ class Watcher:
             return self._degrade("the operator configured the timestamp poll")
         try:
             self._stream = self._open_stream()
-        except ChangefeedRejectedError:
+        # The refusal's own message is the reason, not a sentence written here. It says which
+        # of several unrelated causes actually happened, and a fixed sentence in its place is
+        # what let a missing table read read identically to an unsupported plan for as long as
+        # the statement had existed.
+        except ChangefeedRejectedError as refusal:
             self._record_changefeed(available=False)
-            return self._degrade("the cluster refused the sinkless change stream")
+            return self._degrade(_first_line(refusal))
         self._record_changefeed(available=True)
         self._mode = ConsumptionMode.CHANGEFEED
         self._watermark = write_watermark(
@@ -753,7 +828,7 @@ class Watcher:
         )
 
     def _degrade(self, why: str) -> ConsumptionMode:
-        """Enter the poll: count it, persist it, and say why once."""
+        """Enter the poll: count it, persist it, and say the reason it was entered for."""
         self._mode = ConsumptionMode.POLLING
         metric(DEGRADED_METRIC)
         persist_mode(self._store, ConsumptionMode.POLLING)

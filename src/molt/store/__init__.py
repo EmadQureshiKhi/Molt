@@ -68,6 +68,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
+from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Final, Protocol, TypeVar, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -115,10 +116,13 @@ __all__ = [
     "COMPONENT",
     "DEFAULT_MAX_CONNECTIONS",
     "DEFAULT_STATEMENT_TIMEOUT_MS",
+    "PLATFORM_AUTHORITY",
+    "PLATFORM_AUTHORITY_BUNDLES",
     "READER_DSN_PARAM_KEY",
     "READER_ROLE_NAMES",
     "REQUIRED_SSL_MODE",
     "ROLE_KEY",
+    "ROOT_AUTHORITY_PARAMETER",
     "SSL_MODE_PARAMETER",
     "STATEMENT_TIMEOUT_KEY",
     "STATEMENT_TIMEOUT_STATEMENT",
@@ -127,6 +131,8 @@ __all__ = [
     "MemoryStore",
     "connect",
     "require_verified_tls",
+    "resolved_platform_authority",
+    "root_authority_of",
     "ssl_mode_of",
 ]
 
@@ -139,6 +145,35 @@ COMPONENT: Final[str] = "store"
 # intercepted by a host merely holding some valid certificate.
 REQUIRED_SSL_MODE: Final[str] = "verify-full"
 SSL_MODE_PARAMETER: Final[str] = "sslmode"
+
+# The authority set that verification checks the server's certificate against, the
+# keyword naming the platform's own, and the files a platform keeps it in.
+#
+# Requiring verification without naming an authority set is not a weaker check, it is
+# no connection at all: the client looks for an authority file under the calling user's
+# home directory, finds none in any deployed runtime, and refuses before a request
+# leaves the process. The fault it reports names a missing file in a home directory,
+# which says nothing about the cluster, the credential, or the deployment.
+#
+# The keyword is the portable way to say "the platform's own roots", but whether it
+# resolves depends on how the driver's bundled cryptography library was built rather
+# than on the platform it is running on — the same keyword that works on one machine
+# names a directory that does not exist on another, which is a failure observed rather
+# than imagined. So the keyword is resolved here, in the process that is about to
+# connect and can therefore see its own filesystem, to a bundle that exists. The
+# composing step cannot do this: the machine that writes a connection string into the
+# parameter store is not the machine that dials it.
+#
+# An authority set named explicitly is left alone. That is an operator naming their own
+# trust anchor, and substituting for it would be this module overruling a decision it
+# was not asked about.
+ROOT_AUTHORITY_PARAMETER: Final[str] = "sslrootcert"
+PLATFORM_AUTHORITY: Final[str] = "system"
+PLATFORM_AUTHORITY_BUNDLES: Final[tuple[str, ...]] = (
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/ssl/cert.pem",
+)
 
 # The configuration surface keys this module reads.
 STATEMENT_TIMEOUT_KEY: Final[str] = "MOLT_DB_STATEMENT_TIMEOUT_MS"
@@ -178,6 +213,13 @@ _DRIVER_PACKAGE: Final[str] = "psycopg"
 # and nothing else, so no other part of the value is ever parsed or rendered.
 _KEYWORD_SSL_MODE: Final[re.Pattern[str]] = re.compile(
     r"(?:^|\s)" + SSL_MODE_PARAMETER + r"\s*=\s*'?(?P<mode>[A-Za-z-]+)'?"
+)
+
+# The authority set in the keyword form. Its value is a filesystem path or the
+# platform keyword, so the character class admits path separators and dots where the
+# mode's admits neither.
+_KEYWORD_ROOT_AUTHORITY: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|\s)" + ROOT_AUTHORITY_PARAMETER + r"\s*=\s*'?(?P<authority>[^\s']+)'?"
 )
 
 # The URI schemes the connection string may use. Anything else is read as the
@@ -253,31 +295,91 @@ def ssl_mode_of(dsn: str) -> str | None:
     return match.group("mode").strip().lower() if match else None
 
 
+def root_authority_of(dsn: str) -> str | None:
+    """The authority set a connection string names, or None when it names none.
+
+    Both connection-string forms are read, and nothing but the authority parameter is
+    looked at, so no other part of the value is parsed and none of it is returned.
+    """
+    if _is_uri(dsn):
+        for name, value in parse_qsl(urlsplit(dsn).query, keep_blank_values=True):
+            if name.lower() == ROOT_AUTHORITY_PARAMETER:
+                return value.strip() or None
+        return None
+    match = _KEYWORD_ROOT_AUTHORITY.search(dsn)
+    return match.group("authority").strip() if match else None
+
+
+def resolved_platform_authority(*, bundles: Sequence[str] = PLATFORM_AUTHORITY_BUNDLES) -> str:
+    """The platform's own authority set, as a path when one is found and the keyword otherwise.
+
+    The keyword is the answer of last resort rather than the preferred one, because it
+    is the answer whose resolution this process cannot check. Naming a file that is
+    present is a claim this process has verified; leaving the keyword hands the same
+    question to a library whose build-time configuration may name a path this platform
+    does not have.
+    """
+    for candidate in bundles:
+        if Path(candidate).is_file():
+            return candidate
+    return PLATFORM_AUTHORITY
+
+
+def _keyword_assignment(parameter: str) -> re.Pattern[str]:
+    """The pattern matching one parameter's assignment in the keyword form."""
+    return re.compile(r"(?:^|\s)" + re.escape(parameter) + r"\s*=\s*'?[^\s']*'?")
+
+
+def _with_parameter(dsn: str, parameter: str, value: str) -> str:
+    """The connection string with one parameter set, in whichever form it is written.
+
+    Any existing assignment of the same parameter is removed rather than added
+    alongside, because a connection string naming one parameter twice leaves which
+    value applies to the driver rather than to this module.
+    """
+    if _is_uri(dsn):
+        parts = urlsplit(dsn)
+        pairs = [
+            (name, held)
+            for name, held in parse_qsl(parts.query, keep_blank_values=True)
+            if name.lower() != parameter
+        ]
+        pairs.append((parameter, value))
+        return urlunsplit(parts._replace(query=urlencode(pairs)))
+    stripped = _keyword_assignment(parameter).sub(" ", dsn).strip()
+    separator = " " if stripped else ""
+    return f"{stripped}{separator}{parameter}={value}"
+
+
 def require_verified_tls(dsn: str, *, source_name: str) -> str:
     """Return the connection string with full certificate verification required.
 
-    A string naming no mode gains the requirement. A string naming the required
-    mode is returned unchanged. A string naming a weaker mode is refused, and the
-    refusal names the configured source and the mode that was found, never the
-    connection string itself.
+    A string naming no mode gains the requirement. A string naming a weaker mode is
+    refused, and the refusal names the configured source and the mode that was found,
+    never the connection string itself.
+
+    The authority set verification checks against is settled in the same pass, because
+    the requirement and the authority are only useful together. A string naming none
+    gains this platform's, and a string naming the platform keyword has it resolved to
+    a bundle this process can see. A string naming a path of its own keeps it.
     """
     present = ssl_mode_of(dsn)
-    if present == REQUIRED_SSL_MODE:
-        return dsn
-    if present is not None:
+    if present is not None and present != REQUIRED_SSL_MODE:
         raise InvalidConfigValueError(
             source_name,
             Kind.TEXT,
             f"the connection string asks for {SSL_MODE_PARAMETER} {present} where "
             f"{REQUIRED_SSL_MODE} is required",
         )
-    if _is_uri(dsn):
-        parts = urlsplit(dsn)
-        pairs = parse_qsl(parts.query, keep_blank_values=True)
-        pairs.append((SSL_MODE_PARAMETER, REQUIRED_SSL_MODE))
-        return urlunsplit(parts._replace(query=urlencode(pairs)))
-    separator = " " if dsn.strip() else ""
-    return f"{dsn.strip()}{separator}{SSL_MODE_PARAMETER}={REQUIRED_SSL_MODE}"
+    verified = (
+        dsn
+        if present == REQUIRED_SSL_MODE
+        else _with_parameter(dsn, SSL_MODE_PARAMETER, REQUIRED_SSL_MODE)
+    )
+    named = root_authority_of(verified)
+    if named is not None and named != PLATFORM_AUTHORITY:
+        return verified
+    return _with_parameter(verified, ROOT_AUTHORITY_PARAMETER, resolved_platform_authority())
 
 
 def _target_for(credential: Credential) -> str:
@@ -460,6 +562,28 @@ class MemoryStore:
         """
         with self._condition:
             return len(self._idle), self._leased
+
+    def open_dedicated(self) -> Connection:
+        """Open a connection outside the pool, for a statement that never returns one.
+
+        This exists for exactly one caller shape: a sinkless change stream. Such a stream
+        never finishes, so a pooled connection carrying it would never come back to the
+        pool, and every other statement of the process would queue behind a cursor that by
+        design cannot complete. The stream therefore needs a connection of its own, and
+        closing it is the caller's business rather than this store's.
+
+        It is a factory call rather than an exposed connection string. The string is
+        resolved once and held inside the factory alone, never as an attribute and never
+        in a log record or an error message, and that property is what this preserves: a
+        caller gets a connection it may use and cannot get the credential that opened it.
+
+        Refused after close, for the same reason a lease is: a store that has been closed
+        hands out no further connection, and a dedicated one is still one of its
+        connections.
+        """
+        if self._closed:
+            raise StoreError("the store is closed, so no dedicated connection is opened")
+        return self._connect()
 
     # -- leases ----------------------------------------------------------
 
