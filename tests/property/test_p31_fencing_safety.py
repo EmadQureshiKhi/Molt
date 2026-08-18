@@ -57,12 +57,16 @@ the fence exists for, and the assertion is the whole of requirement 44.8: the
 refusal names both generations, the row count for the run is unchanged, and the
 refusal metric was emitted exactly once.
 
-The example budget is 30 with no per-example deadline. Per-example cost is up to
-three tenant, request, and run inserts and up to fourteen operations, each of which
-is a lease transaction or a fenced write plus the ownership reads its assertions are
-made from, so an example is a few hundred round trips at most. A deadline would fail
-a fourteen-step example for being large rather than for being wrong, which is why
-there is none.
+The example budget is the hundred the plan states, with no per-example deadline, and
+it needed nothing given up to reach it. Per-example cost here is already flat in the
+example's position: an example places up to three tenant, request, and run rows of
+its own and performs up to fourteen operations, each a lease transaction or a fenced
+write plus the ownership reads its assertions are made from, so an example is a few
+hundred round trips at most. No erasure run is driven, no migration is applied past
+the module's first, and every read is keyed by a client identifier this example
+placed, so nothing an earlier example left standing is work a later one pays for and
+the hundredth example costs what the first did. A deadline would fail a fourteen-step
+example for being large rather than for being wrong, which is why there is none.
 """
 
 from __future__ import annotations
@@ -97,7 +101,7 @@ pytestmark = pytest.mark.integration
 
 # How many examples the property runs and how long a drawn schedule is. The
 # reasoning behind the budget is in the module docstring.
-MAX_EXAMPLES: Final[int] = 40
+MAX_EXAMPLES: Final[int] = 100
 MIN_STEPS: Final[int] = 4
 MAX_STEPS: Final[int] = 14
 
@@ -760,14 +764,14 @@ def drive_for(cluster: Cluster, clock: ManualClock, schedule: Schedule) -> Drive
 
 
 # Feature: molt, Property 31: For any interleaving of lease acquisition, renewal,
-# expiry, takeover, worker termination, worker revival, and Disposition writes
-# across 2 to 20 workers contending for 1 to 3 Clients, at most one
-# Fencing_Generation is current per Client at every point, every write carrying a
-# generation other than the current one for that Client is refused as a stale
-# fencing generation and persists no row, every takeover generation strictly
-# exceeds every generation previously recorded for that Client, no takeover is
-# granted while the current lease's expiry is in the future, and a run begun with
-# no held lease performs no mutation.
+# expiry, takeover, worker termination, worker revival, and disposition writes across 2
+# to 20 workers contending for 1 to 3 Clients, at every point in the interleaving at
+# most one Fencing_Generation is current per Client, every write carrying a
+# Fencing_Generation other than the current one for that Client is refused with
+# `stale_fencing_generation` and persists no row, every takeover generation strictly
+# exceeds every generation previously recorded for that Client, no takeover is granted
+# while the current lease's expiry timestamp is in the future, and a run begun with no
+# held lease performs no mutation.
 @settings(
     max_examples=MAX_EXAMPLES,
     deadline=None,

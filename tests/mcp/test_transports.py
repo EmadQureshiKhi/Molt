@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import urllib.request
 from typing import Final
 from uuid import uuid4
@@ -19,6 +20,7 @@ from tests.mcp.harness import Artifact, Corpus, RecordingSink, build_server
 from molt.mcpserver.transport import (
     HEALTH_PATH,
     METHOD_NOT_FOUND_CODE,
+    POLL_SECONDS,
     PROTOCOL_VERSION,
     RPC_PATH,
     HttpTransport,
@@ -32,6 +34,10 @@ pytestmark = pytest.mark.mcp
 # How long the bounded HTTP loop is given, in seconds, before the test gives up on
 # it. A generous bound that still fails rather than hangs.
 REQUEST_TIMEOUT: Final[float] = 5.0
+
+# How many poll intervals the idle case waits before it asks anything. Enough that the
+# loop has certainly polled and found nothing more than once.
+IDLE_POLLS: Final[int] = 3
 
 
 @pytest.fixture(name="corpus")
@@ -138,3 +144,43 @@ def test_the_http_transport_completes_one_handshake_over_a_socket(corpus: Corpus
 
     assert document["result"]["protocolVersion"] == PROTOCOL_VERSION
     assert document["id"] == 7
+    assert transport.answered == 1, "the answer is counted, and only the answer"
+
+
+def test_a_request_arriving_after_several_idle_polls_is_still_answered(
+    corpus: Corpus,
+) -> None:
+    """The bound counts answers, so a quiet server has not used any of it up.
+
+    The socket is polled with a timeout so a stop is noticed without a signal. An
+    expired poll used to count as a served request, which had two consequences: a
+    client that took longer than one poll interval to connect met a server that had
+    already finished — the failure this case reproduces, seen first as a handshake that
+    timed out under parallel load — and the hosted verb's bound of ten thousand ran out
+    after ten thousand polls, a little over half an hour of quiet, while reporting the
+    full count as though it had answered that many calls.
+
+    The wait here is a multiple of the poll interval rather than a duration of its own,
+    so it stays meaningful if the interval changes, and the case is about what the loop
+    counts rather than about how fast the machine is.
+    """
+    server, _ = build_server(corpus, sink=RecordingSink(), transport="http")
+    transport = HttpTransport(server, host="127.0.0.1", port=0)
+    host, port = transport.address
+    transport.start(requests=1)
+    try:
+        time.sleep(POLL_SECONDS * IDLE_POLLS)
+        assert transport.answered == 0, "nothing was asked of it yet"
+        with urllib.request.urlopen(
+            urllib.request.Request(
+                f"http://{host}:{port}{HEALTH_PATH}",
+                method="GET",
+            ),
+            timeout=REQUEST_TIMEOUT,
+        ) as answer:
+            document = json.loads(answer.read())
+    finally:
+        transport.stop()
+
+    assert document["status"] == "ok", document
+    assert transport.answered == 1

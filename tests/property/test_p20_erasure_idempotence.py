@@ -39,9 +39,17 @@ erased tenant is solely bound to is always placed, and the first run is asserted
 to have deleted it, so the second run's emptiness is emptiness after a real
 erasure rather than after a run that selected nothing.
 
-The example budget is deliberately small: each example places a corpus and
-performs two full passes over it against a live instance, and the corpus varies in
-how many rows each table holds rather than in which branch of the pass is taken.
+The example budget is the hundred the plan states, and what pays for it is the
+namespace reset each example opens with rather than a narrower generator. Both runs
+of a pair read across the whole fleet — the sweep's statements are set-based over
+the content tables and the residue walk ranks neighbours over every Embedding in the
+schema — and each of the two digest readings aggregates all seven content tables
+whole. Kept between examples, the corpus of every earlier example is work both runs
+of the last example pay for, so the cost of an example grew with its position and a
+hundred of them would cost far more than four times twenty-five. Emptied first, an
+example costs a migration-free placement of at most a dozen rows and two runs over
+it, whatever its position. No bound of the generator moved and no health check was
+suppressed to reach the figure.
 """
 
 from __future__ import annotations
@@ -73,7 +81,7 @@ pytestmark = pytest.mark.integration
 
 # How many examples the property runs, and the bounds of one placed corpus. The
 # reasoning behind the budget is in the module docstring.
-MAX_EXAMPLES: Final[int] = 25
+MAX_EXAMPLES: Final[int] = 100
 MIN_SOLE_ARTIFACTS: Final[int] = 1
 MAX_SOLE_ARTIFACTS: Final[int] = 2
 MIN_EVENTS: Final[int] = 0
@@ -180,6 +188,52 @@ CONTENT_TABLES: Final[tuple[tuple[str, str], ...]] = (
 # Every other value records a mutation, which is what makes the statement below
 # the run's own list of the Artifacts it touched.
 RETAINED_DISPOSITION: Final[str] = "retained"
+
+# How one example's namespace is emptied before the next one places its corpus.
+#
+# Deletions rather than one cascading truncation, and the difference is the whole
+# reason this suite is runnable. A truncation on this platform is a schema change: it
+# swaps in a fresh table descriptor rather than removing rows, and a cascading one does
+# that for every table descending from the tenant table, which after the protection
+# migration is most of the schema. Schema changes are serialised through the cluster's
+# own job machinery, so a hundred examples became thousands of queued descriptor swaps
+# and the module stopped making progress — measured at seven seconds of processor time
+# across thirteen minutes of waiting, which is the signature of queueing rather than
+# work. A delete is an ordinary data write against the same rows, so it takes the
+# transaction path every other statement in this suite takes.
+#
+# The order is the one the surviving references permit, and it is the same order the
+# erasure engine's own disposition phase fixes: dependents before the rows they hang
+# off, evidence children before the run they belong to, and the tenant row last. Every
+# statement is unconditional, because emptying the namespace is the point.
+RESET_STATEMENTS: Final[tuple[str, ...]] = (
+    "DELETE FROM procedure_confidence_change WHERE true",
+    "DELETE FROM procedure_outcome WHERE true",
+    "DELETE FROM procedure_retrieval WHERE true",
+    "DELETE FROM working_memory WHERE true",
+    "DELETE FROM embedding WHERE true",
+    "DELETE FROM lineage_edge WHERE true",
+    "DELETE FROM client_binding WHERE true",
+    "DELETE FROM disposition WHERE true",
+    "DELETE FROM erasure_candidate WHERE true",
+    "DELETE FROM residue_candidate WHERE true",
+    "DELETE FROM run_session WHERE true",
+    "DELETE FROM backup_record WHERE true",
+    "DELETE FROM audit_log_snapshot WHERE true",
+    "DELETE FROM erasure_certificate WHERE true",
+    "DELETE FROM erasure_run WHERE true",
+    "DELETE FROM erasure_request WHERE true",
+    "DELETE FROM erasure_lease WHERE true",
+    "DELETE FROM checkpoint_session WHERE true",
+    "DELETE FROM ledger_checkpoint WHERE true",
+    "DELETE FROM approval_queue WHERE true",
+    "DELETE FROM policy_match WHERE true",
+    "DELETE FROM derived_artifact WHERE true",
+    "DELETE FROM ledger WHERE true",
+    "DELETE FROM session WHERE true",
+    "DELETE FROM policy_rule WHERE true",
+    "DELETE FROM client WHERE true",
+)
 
 # The evidence this module reads back. The touched list is the second run's own
 # record of what it mutated, read with a statement of this module's own rather
@@ -461,6 +515,25 @@ class Cluster:
             taken[table] = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
         return taken
 
+    def reset(self) -> None:
+        """Empty the namespace, so every example starts from the same state.
+
+        This is what holds the per-example cost flat as the budget rises. Both runs of
+        a pair read across the whole fleet, and each digest reading aggregates a whole
+        table, so with the namespace kept an example's cost grows with everything every
+        earlier example placed. Emptying it first makes the work of the last example
+        the work of the first, and it takes nothing away from the claim: the second run
+        of a pair still meets whatever the first run of that same pair left behind,
+        which is the state this property is about.
+
+        The emptying is a sequence of deletes rather than one cascading truncation, for
+        the reason stated where the statements are declared: a truncation is a schema
+        change on this platform, and a hundred of them serialise into a queue that
+        starves the property of the cluster it is asserting against.
+        """
+        for statement in RESET_STATEMENTS:
+            self.send(statement)
+
     # -- placed rows ------------------------------------------------------
 
     def client(self, marker: str) -> UUID:
@@ -712,14 +785,15 @@ def touched(cluster: Cluster, run_id: UUID) -> tuple[tuple[UUID, str], ...]:
     )
 
 
-# Feature: molt, Property 20: For any Client and any corpus, a second Erasure_Run
-# performed for that same Client after a completed first run changes no
-# memory-content row and produces an empty touched-Artifact list.
+# Feature: molt, Property 20: For any memory graph, a second Erasure_Run for the same
+# Client changes no memory-content row and produces a certificate whose touched-Artifact
+# list is empty.
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(corpus=corpora())
 def test_a_second_run_for_the_same_client_changes_nothing_and_touches_nothing(
     cluster: Cluster, corpus: Corpus
 ) -> None:
+    cluster.reset()
     placed = cluster.place(corpus)
     text = StubTextProvider(answer=redacted_body())
 

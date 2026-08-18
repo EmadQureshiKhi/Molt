@@ -365,11 +365,10 @@ def count_band(count: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-# Feature: molt, Property 2: For any generated memory graph, after an Erasure_Run
-# for one Client, every Artifact carrying no current Client_Binding for that Client
-# before the run holds exactly the content digest, body, and revision it held
-# before, and every such Artifact the run selected as a candidate carries a retained
-# Disposition with a non-empty reason.
+# Feature: molt, Property 2: For any memory graph as in Property 1, for every Artifact
+# carrying no Client_Binding for the erased Client C before the run, the content digest
+# after the run equals the content digest before the run, and every candidate the run
+# left unchanged carries a `retained` Disposition with a non-empty reason.
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(graph=memory_graphs())
 def test_an_erasure_preserves_every_artifact_it_holds_no_claim_on(

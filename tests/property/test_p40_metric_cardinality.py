@@ -283,7 +283,11 @@ def _parse(line: str) -> DivertedRecord:
 # exceeds the configured maximum, and every suppressed emission appears instead
 # as a structured log record carrying the same name, value, and dimensions.
 # Validates: Requirements 33.13, 33.14
-@settings(max_examples=100)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=100, deadline=None)
 @given(metric_streams())
 def test_metric_cardinality_bound_holds_and_diversions_are_recoverable(
     stream: MetricStream,

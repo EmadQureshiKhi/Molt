@@ -636,7 +636,11 @@ def record(case: RequestCase) -> None:
 # processed normally and a body exceeding the maximum is rejected with status code
 # 413 while persisting no record from that request, including no record from the
 # well-formed prefix of an oversized batch.
-@settings(max_examples=MAX_EXAMPLES)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(case=request_bodies())
 def test_a_body_over_the_maximum_is_413_and_reaches_for_no_connection(
     case: RequestCase,

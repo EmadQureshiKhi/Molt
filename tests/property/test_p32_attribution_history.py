@@ -64,18 +64,18 @@ marker carries an empty validity interval that no instant contains, so it would
 contribute a row to the history that neither read form returns. The withdrawal path
 is asserted in the instance-backed module of the same concern.
 
-The example budget is 40 with no per-example deadline. That is smaller than the
-100 the other database-backed properties use, and the reason is the cost of one
-example: up to fifty real attribution writes, each one a transaction of its own
-carrying a decision read, a closing statement, an insert, and a Ledger append, plus
-up to eight as-of queries and three readbacks. Measured against a local instance
-that runs from about 4 milliseconds for a single-write example to about 1450 for a
-fifty-write one, so 40 examples spend a little over half a minute and the file
-finishes inside a minute including the one-time migration of the schema, which is
-about 20 seconds of it. A hundred examples would take past two minutes for no
-additional class of history, since the shape generator reaches every branch and
-every class of instant inside the first forty. Where a budget had to give, it was
-the budget; no assertion was.
+The example budget is the hundred the plan states, with no per-example deadline. What
+one example costs is bounded by the drawn write count and by nothing else: up to fifty
+real attribution writes, each a transaction of its own carrying a decision read, a
+closing statement, an insert, and a Ledger append, plus at most eight as-of queries and
+three readbacks. Nothing in that grows with the example's position, because every read
+is keyed by the Artifact the example drew and no other example shares it. Two costs are
+paid once for the whole module rather than per example: the schema and its migrations,
+and the Clients the writes are spread over, which carry nothing an example varies and
+are therefore placed once by a fixture of their own. What is left per example is the
+Session a supersession Event needs and the writes themselves, and the writes are the
+coverage — the range they are drawn from is the design's own 1 to 50 and it has not
+moved.
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ pytestmark = pytest.mark.integration
 # How many examples the property runs, how long a drawn sequence is, and how many
 # Clients one Artifact is written for. The reasoning behind the budget is in the
 # module docstring.
-MAX_EXAMPLES: Final[int] = 40
+MAX_EXAMPLES: Final[int] = 100
 MIN_WRITES: Final[int] = 1
 MAX_WRITES: Final[int] = 50
 MIN_CLIENTS: Final[int] = 2
@@ -581,6 +581,20 @@ def cluster(
         yield Cluster(store=store, connection=fresh_schema)
 
 
+@pytest.fixture(scope="module")
+def tenants(cluster: Cluster) -> tuple[UUID, ...]:
+    """The Clients every example's writes are spread over, placed once for the module.
+
+    A tenant row carries nothing an example varies, and every claim this property makes
+    is keyed by the pair of an Artifact and a Client while the Artifact is drawn fresh
+    in each example, so one set of Clients can hold the histories of a hundred Artifacts
+    without any two examples meeting on a pair. Placing them once rather than per
+    example is what keeps the rows an example writes for itself down to the Session a
+    supersession Event is appended within, which does have to be its own.
+    """
+    return tuple(cluster.tenant() for _ in range(MAX_CLIENTS))
+
+
 # ---------------------------------------------------------------------------
 # Sending a drawn plan
 # ---------------------------------------------------------------------------
@@ -793,7 +807,7 @@ def shape_tally(plan: WritePlan) -> dict[str, int]:
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(plan=attribution_write_sequences())
 def test_the_history_answers_every_instant_and_stores_what_each_write_said(
-    cluster: Cluster, plan: WritePlan
+    cluster: Cluster, tenants: tuple[UUID, ...], plan: WritePlan
 ) -> None:
     expected = reference_writes(plan)
     supersessions = [
@@ -807,7 +821,7 @@ def test_the_history_answers_every_instant_and_stores_what_each_write_said(
     for name, count in sorted(shape_tally(plan).items()):
         event(f"{name}={count_band(count)}")
 
-    clients = [cluster.tenant() for _ in range(plan.client_count)]
+    clients = list(tenants[: plan.client_count])
     context = cluster.context(cluster.session(clients[0]))
     artifact_id = uuid4()
 

@@ -495,11 +495,12 @@ def equal_confidence_method_changes(
 # ---------------------------------------------------------------------------
 
 
-# Feature: molt, Property 14: For any sequence of repeated Client_Binding writes
-# for the same Artifact and Client with varying confidence values, exactly one
-# unsuperseded Attribution_Version exists per Artifact and Client pair, it holds
-# the maximum submitted confidence value, and every stored confidence lies in the
-# closed interval from 0.0 to 1.0.
+# Feature: molt, Property 14: For any sequence of repeated Client_Binding writes for the
+# same Artifact and Client with varying confidence values, exactly one unsuperseded
+# Attribution_Version exists per Artifact and Client pair, it holds the maximum
+# submitted confidence value, and every stored confidence lies in the closed interval
+# from 0.0 to 1.0. The interval, immutability, and query-form clauses of the same
+# mechanism are carried by Property 32.
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(sequence=binding_write_sequences())
 def test_one_current_version_holds_the_strongest_confidence_ever_submitted(

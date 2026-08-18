@@ -912,7 +912,11 @@ def record(sequence: FrameSequence, rendered: tuple[Rendered, ...], expected: Ex
 # bodies and oversized frames, the byte sequence the proxy forwards equals the byte
 # sequence the proxy received, excluding transport framing, and every result Event
 # links to its call Event.
-@settings(max_examples=100)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=100, deadline=None)
 @given(sequence=jsonrpc_sequences())
 def test_the_proxy_forwards_verbatim_and_links_every_answer_to_its_call(
     sequence: FrameSequence,

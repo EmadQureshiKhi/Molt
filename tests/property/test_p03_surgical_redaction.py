@@ -886,12 +886,11 @@ def cluster(
 # ---------------------------------------------------------------------------
 
 
-# Feature: molt, Property 3: For any blended Derived_Artifact carrying labelled
-# segments of several Clients, an Erasure_Run for one of those Clients leaves the
-# Artifact row in place, leaves the current Attribution_Version set equal to the
-# original set less the erased Client, records both the pre-redaction and the
-# post-redaction content digest on the Disposition, and leaves the pre-redaction
-# body present in no row of any table.
+# Feature: molt, Property 3: For any Blended_Artifact carrying 2 to 4 Client_Bindings,
+# after Surgical_Redaction for Client C the Artifact row still exists, its
+# Client_Binding set equals the original set minus C, both the pre-redaction and
+# post-redaction digests are recorded on the Disposition, and the pre-redaction body
+# text appears in no row of any table.
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(blend=blended_artifacts())
 def test_a_surgical_redaction_keeps_the_row_the_other_tenants_and_none_of_the_old_body(

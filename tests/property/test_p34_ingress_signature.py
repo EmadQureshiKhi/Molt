@@ -7,8 +7,9 @@ the microsecond, and the header casing. What this property adds is the cross
 product: every alteration against every offset class against every body size,
 where the interesting failures live. A verifier that read the body before the
 headers, that compared a prefix rather than a whole digest, that measured the age
-as a signed difference, or that opened its transaction before verifying would pass
-several of those cases individually and fail somewhere in the product.
+as an absolute difference rather than a signed one, or that opened its transaction
+before verifying would pass several of those cases individually and fail somewhere
+in the product.
 
 Five decisions shape it.
 
@@ -26,14 +27,16 @@ with the reading injected, where the offset the generator drew is the age exactl
 **What the host path can and cannot decide is derived rather than assumed.** The
 reading the presented timestamp is offset from is taken before the request is
 built and a second reading is taken after the answer, so the instant the host
-judged the request at is known to lie between them. The age at that instant is
-therefore an interval, and the verdict is determined when the whole interval falls
-on one side of the bound. It does for every alteration — an altered request is
-refused whatever the clock says — and for every offset except the two that sit a
-microsecond from the bound in the direction the drift moves them across it. Those
-two are asserted through the injected reading, and through the host path they
-still assert the load-bearing half: a refusal costs no connection, and a
-connection means the request was accepted. Nothing is excused by a tolerance.
+judged the request at is known to lie between them. The signed age at that instant
+is therefore an interval, and the verdict is determined when the whole interval
+falls on one side of the admitted window. It does for every alteration — an
+altered request is refused whatever the clock says — and for every offset except
+those sitting within the drift of one of the window's two edges, the far one at
+the configured maximum age behind the reading and the near one at the skew
+allowance ahead of it. Those are asserted through the injected reading, and
+through the host path they still assert the load-bearing half: a refusal costs no
+connection, and a connection means the request was accepted. Nothing is excused by
+a tolerance.
 
 **The size band is sampled, and the 5 MiB end is crossed exactly four times.** A
 hundred examples at 5 MiB apiece is half a gigabyte of allocation and of keyed
@@ -84,7 +87,7 @@ from molt.capture.signing import (
     sign_ingress,
 )
 from molt.collector.handler import Collector, Invocation
-from molt.collector.ingress import verify_ingress
+from molt.collector.ingress import CLOCK_SKEW_ALLOWANCE_S, verify_ingress
 from molt.collector.routes import (
     DEFAULT_MAX_BODY_BYTES,
     EVENTS_PATH,
@@ -135,6 +138,14 @@ MAX_AGE_SECONDS: Final[int] = Configuration(environ={}).integer("MOLT_INGRESS_MA
 MICROSECONDS_PER_SECOND: Final[int] = 1000000
 MAX_AGE_MICROSECONDS: Final[int] = MAX_AGE_SECONDS * MICROSECONDS_PER_SECOND
 BOUND: Final[timedelta] = timedelta(seconds=MAX_AGE_SECONDS)
+
+# How far ahead of the reading a presented timestamp may sit, named by the module
+# under test rather than restated here. The window is not symmetric: behind the
+# reading the bound is the configured maximum age, ahead of it this allowance is
+# the whole of what is admitted, and the expectations below are computed from the
+# drawn direction accordingly.
+ALLOWANCE: Final[timedelta] = timedelta(seconds=CLOCK_SKEW_ALLOWANCE_S)
+ALLOWANCE_SECONDS: Final[float] = float(CLOCK_SKEW_ALLOWANCE_S)
 
 # The smallest step past the bound the presented form can carry, because the
 # canonical timestamp renders microseconds, and how far out the far arm sits.
@@ -191,9 +202,12 @@ class OffsetClass(StrEnum):
     """How far a presented timestamp sits from the reading, relative to the bound.
 
     Four classes, each drawn in both directions, so the bound is straddled from
-    inside and outside and from ahead of the reading as well as behind it: a
-    caller whose clock runs fast is presenting a request that will still be
-    replayable once the reading catches up.
+    inside and outside and from ahead of the reading as well as behind it. The two
+    directions are not the same claim: behind the reading a distance up to the
+    configured maximum age is admitted, while ahead of it only the skew allowance
+    is, so a class that is inside the bound is still refused when it is drawn ahead
+    by more than the allowance. Admitting a distant future stamp is what would let
+    a caller hold bytes that become replayable later.
     """
 
     INSIDE = "inside the bound"
@@ -243,13 +257,24 @@ PINNED_TOTAL: Final[int] = PADDED_MIN
 PINNED_INDEX: Final[int] = 0
 PINNED_INSIDE_MICROSECONDS: Final[int] = 0
 
+# The two other distances a pin naming the inside class asks for, both stated as
+# multiples of values the module under test declares rather than as widths of this
+# module's own. The first is exactly the skew allowance, which is the last distance
+# ahead of the reading that is admitted. The second is half the configured maximum
+# age: comfortably inside the bound, so a two-sided window admitted it in either
+# direction, and far outside the allowance, so ahead of the reading it is refused.
+PINNED_AT_ALLOWANCE_MICROSECONDS: Final[int] = CLOCK_SKEW_ALLOWANCE_S * MICROSECONDS_PER_SECOND
+PINNED_WELL_INSIDE_MICROSECONDS: Final[int] = MAX_AGE_MICROSECONDS // 2
+
 
 class HostVerdict(StrEnum):
     """What the host-clock path is known to have decided about one request.
 
-    The undecided value is not a tolerance. It names the two draws whose age
-    interval straddles the bound because the host's reading advanced during the
-    call, and those two are decided exactly by the injected-reading harness.
+    The undecided value is not a tolerance. It names the draws whose signed age
+    interval straddles an edge of the admitted window because the host's reading
+    advanced during the call — the far edge at the configured maximum age behind
+    the reading or the near one at the skew allowance ahead of it — and every one
+    of those is decided exactly by the injected-reading harness.
     """
 
     ACCEPTED = "accepted"
@@ -285,8 +310,17 @@ class SignedRequest:
 
     @property
     def in_window(self) -> bool:
-        """Whether the age bound covers this offset, taken as an absolute value."""
-        return abs(self.offset) <= BOUND
+        """Whether the admitted window covers this offset, in the drawn direction.
+
+        The window runs backwards from the presented instant. A timestamp behind
+        the reading carries a positive age and is covered out to the configured
+        maximum; one ahead of the reading carries a negative age and is covered
+        only as far as the skew allowance. The direction is therefore part of the
+        expectation rather than something an absolute value could discard.
+        """
+        if self.ahead:
+            return self.offset <= ALLOWANCE
+        return -self.offset <= BOUND
 
     @property
     def acceptable(self) -> bool:
@@ -472,8 +506,15 @@ def pinned(
     offset_class: OffsetClass,
     *,
     ahead: bool,
+    inside_microseconds: int = PINNED_INSIDE_MICROSECONDS,
 ) -> SignedRequest:
-    """One case naming the three dimensions and taking the rest as stated."""
+    """One case naming the three dimensions and taking the rest as stated.
+
+    The distance the inside class places a timestamp at is nameable, because the
+    two directions admit different widths: inside the bound and ahead of the
+    reading is an acceptance within the allowance and a refusal beyond it, and a
+    pin that always took the fresh timestamp could reach neither.
+    """
     return build_request(
         band=band,
         records=MIN_RECORDS,
@@ -482,7 +523,7 @@ def pinned(
         index=PINNED_INDEX,
         offset_class=offset_class,
         ahead=ahead,
-        inside_microseconds=PINNED_INSIDE_MICROSECONDS,
+        inside_microseconds=inside_microseconds,
     )
 
 
@@ -602,34 +643,36 @@ def served(body: bytes, headers: dict[str, str], reading: datetime) -> Served:
 
 
 def age_interval(offset: timedelta, drift: float) -> tuple[float, float]:
-    """The ages the host could have measured for one presented timestamp.
+    """The signed ages the host could have measured for one presented timestamp.
 
     The presented timestamp was placed at the reading plus the offset, and the
     instant the host judged it at lies between the reading and the reading plus
-    the drift. The age is the absolute difference between the two, so it spans an
-    interval whose ends are the two extremes of that window, and whose lowest
-    point is zero when the window contains the presented instant itself.
+    the drift. The age is that instant less the presented one, which is signed:
+    negative for a timestamp still ahead of the host's reading and positive for
+    one behind it. The interval therefore runs from minus the offset, where the
+    host judged at the earlier extreme, to the drift less the offset, where it
+    judged at the later one.
     """
     seconds = offset.total_seconds()
-    ends = (abs(seconds), abs(drift - seconds))
-    lowest = 0.0 if 0.0 <= seconds <= drift else min(ends)
-    return lowest, max(ends)
+    return -seconds, drift - seconds
 
 
 def host_verdict(case: SignedRequest, drift: float) -> HostVerdict:
     """What the host-clock path is known to have decided, from the drawn case.
 
     An altered request is refused whatever the clock says, so every alteration arm
-    is decided. An unaltered one is decided when the whole age interval falls on
-    one side of the bound, which it does except for the two draws sitting a
-    microsecond from the bound on the side the drift carries them across.
+    is decided. An unaltered one is decided when the whole signed age interval
+    falls on one side of the admitted window, which runs from minus the skew
+    allowance to the configured maximum age. It does except for a draw sitting
+    within the drift of one of those two edges, and both of those are decided
+    exactly by the injected-reading harness.
     """
     if case.alteration is not Alteration.NONE:
         return HostVerdict.REJECTED
     lowest, highest = age_interval(case.offset, drift)
-    if highest <= float(MAX_AGE_SECONDS):
+    if lowest >= -ALLOWANCE_SECONDS and highest <= float(MAX_AGE_SECONDS):
         return HostVerdict.ACCEPTED
-    if lowest > float(MAX_AGE_SECONDS):
+    if lowest > float(MAX_AGE_SECONDS) or highest < -ALLOWANCE_SECONDS:
         return HostVerdict.REJECTED
     return HostVerdict.UNDECIDED
 
@@ -695,19 +738,46 @@ def record(case: SignedRequest, verdict: HostVerdict) -> None:
 # absent header, and out-of-window timestamp is rejected with status code 401 while
 # persisting no record from that request — including no record from the well-formed
 # prefix of an otherwise valid batch.
-@settings(max_examples=MAX_EXAMPLES)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(case=signed_requests())
-# Eight pinned cases, because a hundred draws over a product this wide reach every
+# Ten pinned cases, because a hundred draws over a product this wide reach every
 # arm on most seeds and not on all of them, and an arm reached in none of the
 # examples asserts nothing. Between them they name every alteration arm, every
-# offset class, both directions, and all three size bands: the empty body mutated,
-# acceptance of the empty body, acceptance exactly at the bound ahead of the
-# reading, and a correctly signed batch refused by the window alone a microsecond
-# behind it.
+# offset class, both directions, and all three size bands. Six of them pin the
+# window itself, and since the window is not symmetric each direction of an offset
+# class is its own arm: acceptance well inside the bound behind the reading;
+# acceptance at the far edge exactly the configured maximum age behind it; refusal
+# a microsecond past that far edge; refusal of an unaltered request stamped a full
+# maximum age ahead of the reading, which a two-sided window admitted; refusal of
+# one stamped well inside the bound but past the allowance ahead, which a two-sided
+# window also admitted; and acceptance at the near edge exactly the allowance
+# ahead, on the empty body.
+@example(case=pinned(BodyBand.PADDED, Alteration.NONE, OffsetClass.INSIDE, ahead=False))
 @example(case=pinned(BodyBand.RECORDS, Alteration.NONE, OffsetClass.AT_BOUND, ahead=False))
-@example(case=pinned(BodyBand.PADDED, Alteration.NONE, OffsetClass.AT_BOUND, ahead=True))
-@example(case=pinned(BodyBand.EMPTY, Alteration.NONE, OffsetClass.INSIDE, ahead=True))
 @example(case=pinned(BodyBand.PADDED, Alteration.NONE, OffsetClass.JUST_BEYOND, ahead=False))
+@example(case=pinned(BodyBand.PADDED, Alteration.NONE, OffsetClass.AT_BOUND, ahead=True))
+@example(
+    case=pinned(
+        BodyBand.RECORDS,
+        Alteration.NONE,
+        OffsetClass.INSIDE,
+        ahead=True,
+        inside_microseconds=PINNED_WELL_INSIDE_MICROSECONDS,
+    )
+)
+@example(
+    case=pinned(
+        BodyBand.EMPTY,
+        Alteration.NONE,
+        OffsetClass.INSIDE,
+        ahead=True,
+        inside_microseconds=PINNED_AT_ALLOWANCE_MICROSECONDS,
+    )
+)
 @example(case=pinned(BodyBand.EMPTY, Alteration.BODY, OffsetClass.INSIDE, ahead=False))
 @example(case=pinned(BodyBand.PADDED, Alteration.SIGNATURE, OffsetClass.JUST_BEYOND, ahead=True))
 @example(
@@ -741,10 +811,10 @@ def test_only_a_correctly_signed_in_window_request_is_accepted(case: SignedReque
         assert case.sent != case.body
 
     # Requirements 47.2, 47.4, 47.5, 47.7 and 47.8 at the microsecond: with the
-    # reading injected, the age is the drawn offset itself, so acceptance holds
-    # exactly for a correctly signed request the bound covers and for nothing else.
-    # The expectation is computed from the drawn dimensions rather than read off
-    # the implementation.
+    # reading injected, the signed age is the drawn offset negated, so acceptance
+    # holds exactly for a correctly signed request the window covers in the
+    # direction it was drawn in and for nothing else. The expectation is computed
+    # from the drawn dimensions rather than read off the implementation.
     assert verified(headers, case.sent, reading) is case.acceptable, (
         f"a {case.band} body with a timestamp {case.offset_class} "
         f"{'ahead of' if case.ahead else 'behind'} the reading and {case.alteration} "

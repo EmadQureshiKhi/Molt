@@ -434,7 +434,11 @@ def _altered(payload: Mapping[str, CanonicalValue], alteration: Alteration) -> C
 # mutation of its payload, verification succeeds on the unmutated certificate and
 # reports `signature_invalid` on every mutated certificate.
 # Validates: Requirements 22.2, 22.3
-@settings(max_examples=100)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=100, deadline=None)
 @given(signed_certificates())
 def test_signature_verification_detects_any_alteration(state: Signed) -> None:
     store = cast("MemoryStore", FakeStore(state.cluster))
@@ -485,7 +489,11 @@ def test_signature_verification_detects_any_alteration(state: Signed) -> None:
 # identifiers and whose digest is over its own canonical bytes. Without it, a
 # generator that produced one fixed shape would make the property above pass while
 # asserting almost nothing.
-@settings(max_examples=20)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=20, deadline=None)
 @given(signed_certificates())
 def test_the_generator_produces_a_document_of_the_signed_contract(state: Signed) -> None:
     client = cast("Mapping[str, object]", state.payload["client"])

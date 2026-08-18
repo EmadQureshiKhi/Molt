@@ -28,7 +28,11 @@ from molt.redact import redact_payload
 # secret-shaped strings, applying the Redactor twice produces the same value as
 # applying it once.
 @given(payload=payloads())
-@settings(max_examples=100)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=100, deadline=None)
 def test_redaction_is_idempotent(payload: JsonObject) -> None:
     once = redact_payload(payload)
     twice = redact_payload(once.payload)

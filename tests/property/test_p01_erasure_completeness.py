@@ -869,10 +869,12 @@ def cluster(
 # ---------------------------------------------------------------------------
 
 
-# Feature: molt, Property 1: For any generated memory graph, an Erasure_Run over one
-# Client leaves no current Attribution_Version naming that Client, records exactly one
-# Disposition carrying a known selection reason for every swept candidate, and selects
-# an Artifact still awaiting its Embedding exactly as it selects any other.
+# Feature: molt, Property 1: For any memory graph of Sessions, Events,
+# Derived_Artifacts, Lineage_Edges, and Client_Bindings over 2 to 5 Clients with
+# derivation depth up to 4, after an Erasure_Run for Client C the set of Artifacts
+# carrying a Client_Binding for C is empty, every candidate selected by any of the five
+# sweep paths has exactly one recorded Disposition carrying a known selection reason,
+# and Artifacts in the pending-embedding state are selected like any other.
 @settings(
     max_examples=MAX_EXAMPLES,
     deadline=None,

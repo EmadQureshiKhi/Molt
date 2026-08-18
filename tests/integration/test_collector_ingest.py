@@ -17,12 +17,22 @@ the proof is the failing half.** A batch naming a Session no row holds is posted
 and the Session row and its Ledger rows are counted afterwards. That half alone
 would pass just as well against two separate transactions, so it is only the
 setup. The claim is made by the second half: a batch whose final record names a
-parent Event no Ledger row holds. The Session insert is the transaction's first
-statement and succeeds, the earlier appends succeed after it, and then the last
-append is refused on the self-reference the Ledger carries over its parent column.
-If the Session were written in a transaction of its own it would survive that
-refusal, and it does not survive it, which is the only observation that
+Client no `client` row holds. The Session insert is the transaction's first
+statement and succeeds, because the Session is derived from the batch's first
+record and that record names the reserved Client; the earlier appends succeed
+after it; and then the last append is refused on the Client reference the Ledger
+carries. If the Session were written in a transaction of its own it would survive
+that refusal, and it does not survive it, which is the only observation that
 distinguishes one transaction from two (Requirement 5.7).
+
+The lever is chosen to be one an authorised erasure never has to cut, which is why
+it is the Client reference and no longer the Ledger's reference to the parent Event
+that a result answers. That one was dropped by migration 017, because a call and
+its result leave together and a reference between them is a cycle no delete order
+satisfies. `ledger.client_id` is in the opposite position: a tenant's Client row
+outlives the erasure of that tenant's memory, since the Client is what the erasure
+was requested for and what its evidence is filed against, so nothing about a
+governed deletion ever asks for this reference to give way.
 
 **Nothing persisted is measured rather than inferred.** Every refusal case counts
 the Session rows and the Ledger rows of the whole schema before the request and
@@ -425,17 +435,20 @@ def build_event(
     *,
     occurred_at: datetime,
     parent_event_id: UUID | None = None,
+    client_id: UUID = UNASSIGNED_CLIENT_ID,
 ) -> Event:
     """One well-formed Event of the shape the capture side transmits.
 
-    The parent reference is the lever the atomicity claim uses: the Ledger carries a
-    reference from that column to its own primary key, so an identifier no row holds
-    is refused by the append and by nothing before it.
+    The Client is the lever the atomicity claim uses. The Ledger carries a reference
+    from that column to `client`, the append binds the record's own value rather than
+    one derived from the Session, and nothing on the request path reads the `client`
+    table, so an identifier no row holds is refused by the append and by nothing
+    before it.
     """
     return Event(
         id=uuid4(),
         session_id=session_id,
-        client_id=UNASSIGNED_CLIENT_ID,
+        client_id=client_id,
         category=EventCategory.TOOL_CALL,
         occurred_at=occurred_at,
         agent_cli=AGENT_CLI,
@@ -452,14 +465,24 @@ def build_batch(
     *,
     records: int = BATCH_RECORDS,
     absent_parent_on_last: bool = False,
+    absent_client_on_last: bool = False,
 ) -> tuple[Event, ...]:
     """A batch of well-formed records for one Session, ordered on the timeline.
 
     The records are spaced so the earliest is identifiable, which is what lets the
     stored Session start instant be asserted against the batch rather than against
-    whatever the cluster happened to default to. When the last record is given an
-    absent parent, every record before it is still well-formed and still lands inside
-    the transaction before the refusal arrives.
+    whatever the cluster happened to default to.
+
+    Two flags each give the last record one absent reference and leave every earlier
+    record well-formed, so the earlier records still land inside the transaction
+    before the refusal arrives. An absent parent Event names a Ledger row that does
+    not exist; since migration 017 dropped that reference the cluster no longer
+    refuses it, and the flag is kept because a record naming an unheld parent is
+    still a shape worth being able to post. An absent Client names a `client` row
+    that does not exist, which the Ledger's Client reference does refuse, and that is
+    the one the atomicity claim turns on. The Session the group implies is derived
+    from the first record, so only the last record's Client is unheld and the Session
+    insert still succeeds.
     """
     base = datetime.now(UTC)
     built: list[Event] = []
@@ -470,6 +493,7 @@ def build_batch(
                 session_id,
                 occurred_at=base + timedelta(seconds=index * RECORD_GAP_SECONDS),
                 parent_event_id=uuid4() if last and absent_parent_on_last else None,
+                client_id=uuid4() if last and absent_client_on_last else UNASSIGNED_CLIENT_ID,
             )
         )
     return tuple(built)
@@ -543,15 +567,23 @@ def test_a_batch_naming_an_absent_session_creates_it_with_its_events(cluster: Cl
     )
 
 
+@pytest.mark.serial
 def test_an_event_the_cluster_refuses_leaves_no_session_behind(cluster: Cluster) -> None:
     """The claim: the Session and its Events share one transaction, not two.
 
-    The batch's final record names a parent Event no Ledger row holds, which the
-    reference the Ledger carries over that column refuses. By the time the refusal
-    arrives the Session insert has committed nothing but has succeeded, and so have
-    the appends of every earlier record, so what the cluster discards is a partial
-    write spanning both tables. A Session written in a transaction of its own would
-    survive that discard and be counted here.
+    The batch's final record names a Client no `client` row holds, which the Client
+    reference the Ledger carries refuses. By the time the refusal arrives the Session
+    insert has committed nothing but has succeeded — it is derived from the first
+    record, whose Client is the reserved one — and so have the appends of every
+    earlier record, so what the cluster discards is a partial write spanning both
+    tables. A Session written in a transaction of its own would survive that discard
+    and be counted here.
+
+    The lever is deliberately one no erasure needs to cut. A tenant's Client row
+    outlives the erasure of that tenant's memory, because it is what the erasure was
+    requested for and what its evidence is filed against, so this reference is not
+    the kind migration 017 had to drop and this test cannot rot the way the
+    parent-Event version of it did.
 
     The response is a 200 whose rejection breakdown says the records were refused,
     because a batch naming rows the cluster does not hold is a fault in the request
@@ -559,7 +591,7 @@ def test_an_event_the_cluster_refuses_leaves_no_session_behind(cluster: Cluster)
     told to stop rather than to spool.
     """
     session_id = uuid4()
-    events = build_batch(session_id, absent_parent_on_last=True)
+    events = build_batch(session_id, absent_client_on_last=True)
     body = batch_body(events)
     before = cluster.stored(session_id)
 

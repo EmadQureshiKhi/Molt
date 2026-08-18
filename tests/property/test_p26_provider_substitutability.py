@@ -67,7 +67,7 @@ well inside the deadline for the longest text the generator admits. Peak live
 allocation stays under a mebibyte: at most three texts of 8192 characters, and one
 1024-component vector per text per selection.
 
-**Validates: Requirements 37.5, 37.8, 37.9, 37.15, 10.2, 10.10**
+**Validates: Requirements 37.5, 37.8, 37.9, 37.15, 10.2, 10.10, 10.14, 10.15**
 """
 
 from __future__ import annotations
@@ -694,7 +694,13 @@ def record(case: ProviderCase) -> None:
 # provider's — the schema and the nearest-neighbour query text are byte-identical
 # across provider selections, and the written Embedding row carries the selected
 # provider name alongside the model identifier and the unit-norm assertion.
-@settings(max_examples=MAX_EXAMPLES)
+# No per-example deadline, which is what every other property module in this suite
+# states too. A deadline is a wall-clock assertion, and wall-clock time here is a
+# function of how much else is running: under parallel execution this module was seen to
+# fail on an example that took a second under load and twenty milliseconds on its own,
+# which says nothing about substitutability. Latency has a suite of its own with bounds
+# stated deliberately.
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(case=provider_inputs())
 def test_every_selection_produces_unit_vectors_over_one_schema_and_one_query(
     case: ProviderCase,

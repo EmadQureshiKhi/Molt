@@ -17,7 +17,17 @@ and the wrong-identifier case is modelled the way a key service would answer it:
 the identifier names a real key, the retrieval returns that key's public half, and
 the signature made under the other key does not verify against it.
 
-**Validates: Requirements 22.3, 36.13**
+Three further documents are signed, intact, and still refused. A certificate that
+declares a laxer expectation beside a Verification_Query, one that lists no queries
+at all, and one that names a Session without committing to its terminal digest are
+each an attempt to have the completeness of an erasure taken on the document's own
+word. The expectation applied and the queries a certificate owes are properties of
+the fixed template set rather than fields of the payload, so none of the three
+reaches a `verified` outcome, and the third produces a report rather than an
+exception because an unverifiable certificate is a worse answer for an auditor than
+a failed one.
+
+**Validates: Requirements 22.3, 22.4, 22.7, 22.9, 36.13**
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from molt.attest.canonical import CERTIFICATE_ARRAY_RULES, CanonicalValue, canonicalise
 from molt.attest.verifier import (
+    CHAIN_TIP_MISMATCH,
     CURRENT_BINDINGS_QUERY,
     CURRENT_DIGESTS_QUERY,
     CURRENT_ROLE_QUERY,
@@ -43,9 +54,11 @@ from molt.attest.verifier import (
     EXISTING_ARTIFACTS_QUERY,
     LIVE_COUNT_QUERY,
     LIVE_SESSIONS_QUERY,
+    QUERY_TEMPLATE_UNKNOWN,
     QUERY_TEMPLATES,
     SIGNATURE_INVALID,
     SUPPORTED_ALGORITHM,
+    VERIFICATION_QUERY_MISSING,
     Envelope,
     VerificationReport,
     exit_code,
@@ -443,3 +456,90 @@ def test_a_truncated_signature_reports_signature_invalid(keys: Keys) -> None:
     )
     _assert_invalid(report)
     assert {entry.subject for entry in report.failed_checks} == {"signature_value"}
+
+
+# ---------------------------------------------------------------------------
+# Three documents that are signed, intact, and still do not verify
+# ---------------------------------------------------------------------------
+
+
+def _queries_of(payload: Mapping[str, CanonicalValue]) -> list[dict[str, CanonicalValue]]:
+    """The payload's verification-query entries, as mutable copies."""
+    return [
+        dict(entry)
+        for entry in cast("Sequence[Mapping[str, CanonicalValue]]", payload["verification_queries"])
+    ]
+
+
+def test_a_weakened_expectation_does_not_switch_off_the_completeness_check(keys: Keys) -> None:
+    """Requirement 22.4: the expectation applied is the template's, not the document's.
+
+    The issuer signs the weakened document, so nothing here is a tampering fault:
+    the signature stands and the finding is that the query is not the fixed template
+    it names. That is the whole point of the fixed set — a certificate cannot choose
+    the terms it is judged on.
+    """
+    payload = _payload()
+    queries = _queries_of(payload)
+    queries[0]["expectation"] = "any"
+    payload["verification_queries"] = queries
+
+    report = _report(_signed(payload, keys), keys)
+    assert not report.verified
+    assert SIGNATURE_INVALID not in report.failed_check_names
+    assert QUERY_TEMPLATE_UNKNOWN in report.failed_check_names
+    assert exit_code(report) != 0
+    applied = next(entry for entry in report.queries if entry.name == ATTRIBUTION_QUERY_NAME)
+    assert applied.expectation == "empty", (
+        "the reported expectation is the one the verifier applied, which is the "
+        "template's, so a reader of the report sees the terms of the check made"
+    )
+
+
+def test_a_certificate_listing_no_queries_reports_each_obligatory_query_missing(
+    keys: Keys,
+) -> None:
+    """Requirement 22.4: an obligatory check nobody made is a finding, not a pass.
+
+    A document carrying an empty query list previously reported `verified` with the
+    erasure-completeness check never performed, which is the one check a hostile
+    reviewer relies on.
+    """
+    payload = _payload()
+    payload["verification_queries"] = []
+
+    report = _report(_signed(payload, keys), keys)
+    assert not report.verified
+    assert report.queries == ()
+    assert VERIFICATION_QUERY_MISSING in report.failed_check_names
+    missing = {
+        entry.subject for entry in report.failed_checks if entry.check == VERIFICATION_QUERY_MISSING
+    }
+    assert missing == {ATTRIBUTION_QUERY_NAME, SESSIONS_QUERY_NAME}
+    assert exit_code(report) != 0
+
+
+def test_a_null_session_tip_is_reported_rather_than_left_unverifiable(keys: Keys) -> None:
+    """Requirement 22.7: a nullable field the document leaves empty still yields a report.
+
+    The recorded tip is nullable on the per-Session row, so this document is one a
+    cluster can produce. An auditor holding it needs a verdict rather than an
+    exception, so the absent commitment is reported under the tip check and the rest
+    of the verification still runs.
+    """
+    payload = _payload()
+    sessions = [
+        dict(entry) for entry in cast("Sequence[Mapping[str, CanonicalValue]]", payload["sessions"])
+    ]
+    sessions[0]["terminal_chain_digest"] = None
+    payload["sessions"] = sessions
+
+    report = _report(_signed(payload, keys), keys)
+    assert not report.verified
+    assert SIGNATURE_INVALID not in report.failed_check_names
+    assert CHAIN_TIP_MISMATCH in report.failed_check_names
+    assert exit_code(report) != 0
+    assert report.chains[0].rows == 0, (
+        "the chain was still re-derived, so the absent tip narrowed the finding "
+        "rather than stopping the verification"
+    )

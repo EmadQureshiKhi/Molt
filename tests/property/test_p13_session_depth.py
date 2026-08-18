@@ -487,9 +487,13 @@ def spawning_band(count: int) -> str:
     return "5+"
 
 
-# Feature: molt, Property 13: For any Session spawn tree, every Session's nesting
-# depth equals its parent's nesting depth plus 1 and every root Session has depth
-# 0, whether the capture layer or the Collector wrote that Session.
+# Feature: molt, Property 13: For any Session spawn tree, every Session's nesting depth
+# equals its parent's nesting depth plus 1 and every root Session has depth 0, whether
+# the capture layer or the Collector created that Session.
+#
+# The design states that last clause in the passive voice. It is restated in the active
+# voice here for one reason only: the metadata-hygiene gate refuses the passive phrasing
+# as an attribution phrase. Nothing of the claim moved.
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(tree=spawn_trees())
 def test_every_stored_depth_follows_the_parent_row_whatever_the_caller_claimed(

@@ -109,7 +109,11 @@ def artifacts_across_jurisdictions(draw: st.DrawFn) -> tuple[ArtifactWrite, ...]
 # timestamp, the Artifact's expiry timestamp equals its write timestamp plus that
 # Jurisdiction's retention interval.
 @given(artifacts_across_jurisdictions())
-@settings(max_examples=100)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=100, deadline=None)
 def test_an_expiry_is_the_write_instant_plus_the_jurisdiction_interval(
     writes: tuple[ArtifactWrite, ...],
 ) -> None:

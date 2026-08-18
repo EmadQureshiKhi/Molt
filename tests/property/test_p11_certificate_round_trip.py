@@ -470,7 +470,11 @@ def expected_counts(graph: Sequence[GraphArtifact], live_bound: int) -> tuple[in
 # from, and the before-state and after-state counts derived from the Ledger and the
 # recorded Dispositions equal the counts computed independently from the generating
 # memory graph with `count_derivation` reading `ledger_and_dispositions`.
-@settings(max_examples=MAX_EXAMPLES)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(case=certificate_payloads())
 def test_certificate_canonical_round_trip_and_schema_completeness(case: Generated) -> None:
     """One conjoined statement: order-independent bytes, equivalent parse, whole schema."""
@@ -531,7 +535,11 @@ def test_certificate_canonical_round_trip_and_schema_completeness(case: Generate
     event(f"corroboration attempted: {case.evidence.counts.corroboration.attempted}")
 
 
-@settings(max_examples=MAX_EXAMPLES)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(case=certificate_payloads())
 def test_the_envelope_carries_the_digest_of_the_payload_it_wraps(case: Generated) -> None:
     """Signing commits to the canonical digest, and the envelope states that digest."""

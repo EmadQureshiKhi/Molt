@@ -9,19 +9,24 @@ derived value stored regardless of what it presented, in both directions: a call
 claiming to be deeper than its parent and a caller claiming to be shallower are
 both corrected by the same expression.
 
-A Session naming a parent that does not exist is refused by the reference on the
-parent column, and refused is the requirement. This is the case a naive derivation
-gets wrong by inserting nothing at all and reporting success, so the assertion
-below checks both that the write failed and that no row landed.
+A Session naming a parent that does not exist is refused, and refused is the
+requirement. The refusal is the inserting statement's own guard rather than a
+foreign key: the two references it used to rest on are references an authorised
+erasure has to be able to cut, and migration 017 drops them, so the write path
+carries the invariant itself and carries it at every generation. This is the case a
+naive derivation gets wrong by inserting nothing at all and reporting success, so
+the assertion below checks both that the write failed and that no row landed.
 
 A transaction writing a spawning Event together with the child Session it spawned
-has exactly one admissible order. The reference from a Session to the Ledger is
-checked per statement and is declared deferrable nowhere, so the Event goes first.
-Both halves are asserted: the correct order commits, and the reverse order is
-refused by the cluster rather than tolerated.
+has exactly one admissible order. Nothing here is deferred to commit, so the
+Session insert can only find the spawning row if the Event was written first. Both
+halves are asserted: the correct order commits, and the reverse order is refused
+rather than tolerated.
 
 Only the first migration generation is applied, staged into a directory of its
 own, so the schema under test is exactly what generations 001 through 007 declare.
+Neither refusal depends on that: the guard is in the statement, so the same two
+cases fail the same way on the full schema, where the references are gone.
 """
 
 from __future__ import annotations
@@ -251,7 +256,7 @@ def test_depth_is_derived_from_the_parent_row(cluster: Cluster) -> None:
 
 
 def test_a_session_naming_an_absent_parent_is_refused(cluster: Cluster) -> None:
-    """The reference refuses the write, and no row lands."""
+    """The write path refuses the write, and no row lands."""
     absent = uuid4()
     orphan = build_session(cluster.client_id, parent_session_id=absent, depth=1)
 
@@ -326,7 +331,7 @@ def test_the_spawning_event_and_the_child_session_commit_in_that_order(
 
 
 def test_a_session_naming_an_unwritten_spawning_event_is_refused(cluster: Cluster) -> None:
-    """The reverse order is refused by the cluster, which is why the order exists."""
+    """The reverse order is refused, which is why the order exists."""
     child = build_session(cluster.client_id)
 
     with pytest.raises(MissingParentError, match="spawning Event"):

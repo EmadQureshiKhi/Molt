@@ -194,7 +194,11 @@ def _assert_sequence_shape(
         st.just(DEFAULT_MAX_DEPTH),
     ),
 )
-@settings(max_examples=100)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=100, deadline=None)
 def test_redaction_preserves_structure(payload: JsonObject, max_depth: int) -> None:
     result = redact_payload(payload, settings=RedactionSettings(max_depth=max_depth))
     _assert_shape(payload, result.payload, depth=0, limit=max_depth, sensitive=False)

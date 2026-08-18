@@ -81,7 +81,11 @@ from molt.store.chain import (
 )
 from molt.store.migrate import apply_migrations, discover_migrations
 
-pytestmark = [pytest.mark.integration, pytest.mark.concurrency]
+# Marked serial because the subject is the contention this module creates itself:
+# concurrent appends to one Session against a bounded retry budget. Load from unrelated
+# suites spends that budget on other transactions, so the module reports exhaustion where
+# the property it asserts holds. It is run in a pass of its own.
+pytestmark = [pytest.mark.integration, pytest.mark.concurrency, pytest.mark.serial]
 
 # How many examples the property runs, and the bounds of a drawn schedule. The
 # reasoning behind the budget is in the module docstring.

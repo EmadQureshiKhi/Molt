@@ -738,3 +738,32 @@ def test_a_model_that_refuses_still_leaves_the_run_completed(cluster: Cluster) -
 
     assert outcome.status is RunStatus.COMPLETED
     assert outcome.fail_closed_rewrites == 1
+
+
+def test_a_completed_dry_run_leaves_the_tenant_erasable_at_once(
+    cluster: Cluster,
+) -> None:
+    """The rehearsal gives its window back, so the run it rehearsed can start.
+
+    A lease keeps two workers from erasing one tenant at the same time. A dry run
+    mutates no memory content, so once it has completed there is nothing left for its
+    window to protect — and a window it kept could not be re-taken by the same operator
+    under a new attempt key, which is exactly what *rehearse, read the plan, then
+    erase* is. Holding it would make the sequence the dry run exists for the one
+    sequence the lease refuses.
+    """
+    fixture = cluster.fixture()
+    cluster.corpus(fixture)
+    cluster.working(fixture.session_id, fixture.erased_id, "held-key")
+
+    rehearsal = run_erasure(cluster.store, request_for(fixture, dry_run=True), seams(fixture))
+    assert rehearsal.status is RunStatus.COMPLETED
+
+    # A second attempt, under its own key, with no wait for the interval to run out.
+    outcome = run_erasure(cluster.store, request_for(fixture), seams(fixture))
+
+    assert outcome.status is RunStatus.COMPLETED, (
+        "the rehearsal's lease was still held, so the erasure it rehearsed was refused"
+    )
+    assert outcome.run_id != rehearsal.run_id, "the second attempt is its own run"
+    assert outcome.working_rows_deleted == 1, "and this one did the work"

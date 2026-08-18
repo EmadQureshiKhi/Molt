@@ -4,8 +4,8 @@ Nothing here opens a socket. A recording cursor answers each statement from a
 script and keeps what it was sent, so the claims below are asserted by reading the
 statements the module produced rather than by reaching a cluster. The claims that
 need a cluster to be meaningful, that depth really is read from the parent row and
-that an absent parent really is refused by the reference, are asserted by the
-instance-backed session-write module of the integration suite.
+that an absent parent really is refused, are asserted by the instance-backed
+session-write module of the integration suite.
 
 The script answers the module's own statements and no others. A connection also
 carries statements neither this module nor its caller wrote: the pool establishes
@@ -16,11 +16,17 @@ the module under test asked for, and an assertion about one transaction is made
 over the statements between that transaction's own framing rather than over
 everything a pooled connection ever saw.
 
-Four properties of the shape are checked here.
+Five properties of the shape are checked here.
 
 The depth a caller presents is not sent. The insert binds every other column and
 derives depth inside the statement, so a caller cannot place a Session at a depth
 the stored graph disagrees with.
+
+The absent-parent refusal is the statement's own. Its two guards require a named
+parent row and a named spawning row to have been found, so a Session naming a row
+nobody holds selects nothing and the module reports that empty result as a missing
+parent. That is asserted here without a driver failure of any kind, which is the
+difference from the two translation cases below it.
 
 A counter moves by increment. Each assignment names the column it is assigning,
 and the transaction holds exactly one statement between its framing, so there is
@@ -44,7 +50,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from molt.errors import MissingParentError
+from molt.errors import MissingParentError, StoreError
 from molt.models.session import Session, SessionOutcome
 from molt.store import STATEMENT_TIMEOUT_STATEMENT, Connection, MemoryStore
 from molt.store.retry import (
@@ -305,6 +311,40 @@ def test_a_root_session_derives_depth_zero_from_an_unmatched_join() -> None:
     bound = connection.parameters_of(INSERT_SESSION_STATEMENT)
     assert bound is not None
     assert bound[-1] is None
+
+
+def test_the_insert_carries_its_own_absent_reference_guards() -> None:
+    """The refusal is the statement's, so it does not rest on a droppable reference.
+
+    Both guards read the same way: either the Session named no such row, or the join
+    for it found one. A named row that was not found leaves the statement selecting
+    nothing, which is the empty result the two cases below turn on.
+    """
+    assert "LEFT JOIN ledger AS spawning ON spawning.id = %s" in INSERT_SESSION_STATEMENT
+    assert "WHERE (%s::UUID IS NULL OR spawning.id IS NOT NULL)" in INSERT_SESSION_STATEMENT
+    assert "AND (%s::UUID IS NULL OR parent.id IS NOT NULL)" in INSERT_SESSION_STATEMENT
+
+
+def test_an_insert_that_selected_no_row_names_the_reference_the_record_named() -> None:
+    """With no driver failure at all, an empty result is the absent-parent refusal."""
+    parent = uuid4()
+    connection = ScriptedConnection(rows=[None])
+
+    with pytest.raises(MissingParentError) as raised:
+        upsert_session(build_store(connection), build_session(parent_session_id=parent))
+
+    assert str(parent) in str(raised.value)
+    assert COMMIT_STATEMENT not in connection.statements, "nothing was committed"
+
+
+def test_a_root_session_that_selected_no_row_is_not_called_a_missing_parent() -> None:
+    """A Session naming neither row cannot be filtered, so no lineage fault is claimed."""
+    connection = ScriptedConnection(rows=[None])
+
+    with pytest.raises(StoreError) as raised:
+        upsert_session(build_store(connection), build_session())
+
+    assert not isinstance(raised.value, MissingParentError)
 
 
 def test_an_absent_parent_is_reported_as_a_missing_parent() -> None:

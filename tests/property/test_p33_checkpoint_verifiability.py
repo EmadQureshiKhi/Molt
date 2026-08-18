@@ -462,7 +462,11 @@ def _apply(state: CheckpointState, target: UUID) -> None:
 # a mutation performed by no run leaves at least one changed Session unaccounted
 # for.
 # Validates: Requirements 45.2, 45.3, 45.6, 45.7, 45.8
-@settings(max_examples=100)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=100, deadline=None)
 @given(checkpoint_states())
 def test_a_checkpoint_agrees_before_a_change_and_localises_it_afterwards(
     state: CheckpointState,

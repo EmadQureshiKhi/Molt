@@ -23,10 +23,21 @@ response that distinguishes the causes, which by design it does not.
 Nothing here waits on a clock. The age bound is examined at the microsecond in
 both directions through the injected reading, and the one path that has no
 injected reading by design — the handler's own, which takes the host's — is driven
-by offsetting a presented timestamp rather than by letting time pass.
+by offsetting a presented timestamp rather than by letting time pass. The two
+directions are different widths: the window runs the configured maximum age
+backwards from the reading and only the skew allowance forwards, and the sum of
+those is asserted directly as the interval a captured request stays replayable in.
 
-**Validates: Requirements 5.13, 47.1, 47.2, 47.3, 47.4, 47.5, 47.6, 47.7, 47.8,
-47.9, 47.11, 47.12, 47.13**
+The last two sections leave the signature boundary and take up the other check
+that runs before a durable write: that nothing content-bearing reaches a record
+unredacted, and that when an operator switches redaction off, something says so.
+They sit here because they are the same class of claim — a boundary examined ahead
+of a write that cannot be taken back — and because the recall Ledger append and the
+adapter Event construction are the two write paths whose redaction was decided by a
+hardcoded flag rather than by the Redactor's own report.
+
+**Validates: Requirements 1.7, 1.8, 4.1, 4.6, 5.13, 47.1, 47.2, 47.3, 47.4, 47.5,
+47.6, 47.7, 47.8, 47.9, 47.11, 47.12, 47.13**
 """
 
 from __future__ import annotations
@@ -34,8 +45,8 @@ from __future__ import annotations
 import hmac
 import io
 import json
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Final, Protocol
@@ -43,7 +54,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from molt import recall
+from molt.capture.adapters import builders
 from molt.capture.hook import batch_body
+from molt.capture.protocol import UNASSIGNED_CLIENT, CaptureContext, SystemClock
 from molt.capture.signing import (
     AUTHORIZATION_HEADER,
     BEARER_SCHEME,
@@ -61,6 +75,7 @@ from molt.collector.handler import (
     _load_verification,
 )
 from molt.collector.ingress import (
+    CLOCK_SKEW_ALLOWANCE_S,
     COMPONENT,
     SIGNATURE_REJECTED_METRIC,
     RejectionCause,
@@ -78,9 +93,17 @@ from molt.collector.routes import (
 from molt.config.resolve import Configuration
 from molt.config.secrets import Credential, CredentialSource
 from molt.errors import IngressRejectedError, StoreError
-from molt.models.event import Event, EventCategory
+from molt.models.event import Event, EventCategory, JsonObject
 from molt.models.session import UNASSIGNED_CLIENT_ID
+from molt.recall import RecallEngine
+from molt.redact import (
+    REDACTION_DISABLED_RECORD,
+    REDACTION_PLACEHOLDER,
+    RedactionSettings,
+)
 from molt.store import Connection, MemoryStore
+from molt.store.chain import LedgerAppend
+from molt.store.embeddings import PrincipalScope
 from molt.telemetry import Telemetry, configure, reset
 
 # The two credentials, shaped like the values a deployment holds and obviously
@@ -105,6 +128,23 @@ ONE_MICROSECOND: Final[timedelta] = timedelta(microseconds=1)
 
 # A value in the timestamp header that names no instant at all.
 UNREADABLE_TIMESTAMP: Final[str] = "the day before yesterday"
+
+# A credential-shaped span built from a keyword and a long run of one character,
+# so this module states no plausible secret while still exercising the Redactor.
+SHAPED_TAIL: Final[str] = "q" * 32
+SHAPED_SPAN: Final[str] = f"bearer {SHAPED_TAIL}"
+REDACTED_SPAN: Final[str] = f"bearer {REDACTION_PLACEHOLDER}"
+
+# The instant the recall Event under test is placed at, and the retention the
+# tenancy carries. Both fixed, so no example depends on when it ran.
+RECALL_MOMENT: Final[datetime] = datetime.fromtimestamp(0.0, tz=UTC)
+RECALL_RETENTION: Final[timedelta] = timedelta(days=90)
+RECALL_FLOOR: Final[float] = 0.15
+
+# How many shaped values one payload carries in the flood example. Well above the
+# one record the latency budget admits per Event, so a per-value emission would be
+# unmistakable rather than a near miss.
+FLOOD_KEYS: Final[int] = 64
 
 # How long a hex digest of this size is, and a presented value of that length
 # carrying characters a comparison over text does not admit.
@@ -677,23 +717,87 @@ def test_the_configured_default_maximum_request_age_is_the_stated_one() -> None:
     assert Configuration(environ={}).integer("MOLT_INGRESS_MAX_AGE_SECONDS") == MAX_AGE_SECONDS
 
 
-@pytest.mark.parametrize("ahead", [False, True], ids=["behind", "ahead"])
-def test_a_timestamp_exactly_at_the_bound_is_accepted_in_either_direction(
-    ahead: bool,
+def test_a_timestamp_exactly_at_the_bound_behind_the_reading_is_accepted(
     time_source: ManualClock,
 ) -> None:
-    """The boundary is inclusive on the accepted side, and the difference is absolute.
+    """The boundary is inclusive on the accepted side, measured backwards.
 
-    A timestamp as far ahead of the reading as the bound allows is as admissible as
-    one that far behind it, which is what makes the bound a window rather than a
-    floor.
+    Behind the reading is where a request's age lives, so this is the edge
+    Requirements 47.5 and 47.6 are about: an age of exactly the configured maximum
+    is accepted and anything staler is not.
     """
     reading = time_source.now()
     body = a_batch(reading, records=1)
-    offset = timedelta(seconds=MAX_AGE_SECONDS)
-    presented = ingress_timestamp(reading + offset if ahead else reading - offset)
+    presented = ingress_timestamp(reading - timedelta(seconds=MAX_AGE_SECONDS))
 
     verify_ingress(presenting(presented, body), body, SHARED_VALUE, MAX_AGE_SECONDS, now=reading)
+
+
+def test_a_timestamp_at_the_skew_allowance_ahead_of_the_reading_is_accepted(
+    time_source: ManualClock,
+) -> None:
+    """Ordinary clock disagreement between the two hosts is tolerated, and only that.
+
+    The allowance exists because the timestamp is stamped on the capture host and
+    the bound is measured on the Collector host. It is a named, bounded number
+    rather than an open-ended future admission, which is the distinction the whole
+    of the window's honesty rests on.
+    """
+    reading = time_source.now()
+    body = a_batch(reading, records=1)
+    presented = ingress_timestamp(reading + timedelta(seconds=CLOCK_SKEW_ALLOWANCE_S))
+
+    verify_ingress(presenting(presented, body), body, SHARED_VALUE, MAX_AGE_SECONDS, now=reading)
+
+
+def test_a_request_stamped_a_full_maximum_age_into_the_future_is_refused(
+    time_source: ManualClock,
+    recorded: Recorded,
+) -> None:
+    """The future timestamp is what doubled the window, so it is refused outright.
+
+    Measured as an absolute difference, this request was admissible the instant it
+    was made, stayed admissible while the reading climbed towards its timestamp, and
+    was then admissible for the whole configured maximum age after the reading
+    passed it: a replayable window of twice the maximum. Nothing about it is stale,
+    which is exactly why an absolute difference cannot be what bounds it.
+    """
+    reading = time_source.now()
+    body = a_batch(reading, records=1)
+    presented = ingress_timestamp(reading + timedelta(seconds=MAX_AGE_SECONDS))
+
+    with pytest.raises(IngressRejectedError):
+        verify_ingress(
+            presenting(presented, body), body, SHARED_VALUE, MAX_AGE_SECONDS, now=reading
+        )
+
+    assert recorded.causes() == (str(RejectionCause.OUTSIDE_WINDOW),)
+
+
+def test_the_admitted_window_is_the_maximum_age_plus_the_skew_allowance(
+    time_source: ManualClock,
+) -> None:
+    """One set of bytes, and the whole interval it is admissible over, at both edges.
+
+    The same headers and the same body are judged against a moving reading, which is
+    what a replay is. The earliest reading that admits them is the skew allowance
+    before the presented instant and the latest is the configured maximum age after
+    it, so the interval is that sum — 305 seconds at the default, not 600 — and a
+    microsecond outside either edge is refused.
+    """
+    reading = time_source.now()
+    body = a_batch(reading, records=1)
+    headers = presenting(ingress_timestamp(reading), body)
+    earliest = reading - timedelta(seconds=CLOCK_SKEW_ALLOWANCE_S)
+    latest = reading + timedelta(seconds=MAX_AGE_SECONDS)
+
+    verify_ingress(headers, body, SHARED_VALUE, MAX_AGE_SECONDS, now=earliest)
+    verify_ingress(headers, body, SHARED_VALUE, MAX_AGE_SECONDS, now=latest)
+
+    for outside in (earliest - ONE_MICROSECOND, latest + ONE_MICROSECOND):
+        with pytest.raises(IngressRejectedError):
+            verify_ingress(headers, body, SHARED_VALUE, MAX_AGE_SECONDS, now=outside)
+    assert (latest - earliest).total_seconds() == MAX_AGE_SECONDS + CLOCK_SKEW_ALLOWANCE_S
 
 
 @pytest.mark.parametrize("ahead", [False, True], ids=["behind", "ahead"])
@@ -702,10 +806,16 @@ def test_a_timestamp_one_microsecond_past_the_bound_is_refused_in_either_directi
     time_source: ManualClock,
     recorded: Recorded,
 ) -> None:
-    """One microsecond beyond the bound is outside it, at the smallest step there is."""
+    """One microsecond beyond the admitted window is outside it, on both sides.
+
+    The two sides are different widths, and that asymmetry is the fix: the window
+    reaches the configured maximum age behind the reading and the skew allowance
+    ahead of it.
+    """
     reading = time_source.now()
     body = a_batch(reading, records=1)
-    offset = timedelta(seconds=MAX_AGE_SECONDS) + ONE_MICROSECOND
+    width = CLOCK_SKEW_ALLOWANCE_S if ahead else MAX_AGE_SECONDS
+    offset = timedelta(seconds=width) + ONE_MICROSECOND
     presented = ingress_timestamp(reading + offset if ahead else reading - offset)
 
     with pytest.raises(IngressRejectedError):
@@ -787,9 +897,16 @@ def test_a_collector_holding_no_shared_value_refuses_rather_than_keying_with_not
     """A digest keyed with nothing is forgeable by anyone holding the body.
 
     The refusal is the ingress refusal rather than a fault, because the caller's
-    answer is the same 401 either way while a fault would fail the invocation. It
-    is not counted under the rejection metric: that counter counts refused callers,
-    and this is a deployment that can verify nobody.
+    answer is the same 401 either way while a fault would fail the invocation. It is
+    counted and recorded like every other refusal (Requirement 47.13): a deployment
+    that can verify nobody would otherwise refuse every caller in complete silence
+    and look exactly like a deployment nobody is calling.
+
+    The cause reads as the mismatch cause because that is what was established — no
+    presented signature was shown to be the computed one — and no fifth member is
+    invented for it, since Requirement 47.13 enumerates four causes. The detail in
+    the same record is what names the deployment fault, so an operator is pointed at
+    the deployment rather than at the caller.
     """
     reading = time_source.now()
     body = a_batch(reading, records=1)
@@ -798,4 +915,236 @@ def test_a_collector_holding_no_shared_value_refuses_rather_than_keying_with_not
     with pytest.raises(IngressRejectedError, match="no ingress shared value"):
         verify_ingress(headers, body, "", MAX_AGE_SECONDS, now=reading)
 
-    assert recorded.rejections == 0.0
+    assert recorded.rejections == 1.0
+    assert recorded.causes() == (str(RejectionCause.MISMATCH),)
+    assert "no ingress shared value" in recorded.rendered()
+
+
+# ---------------------------------------------------------------------------
+# The recall Ledger append, and the query text it carries
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class Appended:
+    """The Ledger appends the chain seam was handed, captured rather than written.
+
+    The seam is replaced rather than the store, because the claim is about what the
+    Event carries and not about how a row is written. A store nothing reaches is
+    enough underneath it.
+    """
+
+    requests: list[LedgerAppend] = field(default_factory=list)
+
+    def take(self, _store: MemoryStore, request: LedgerAppend) -> None:
+        """Keep one append, as the chain would have written one."""
+        self.requests.append(request)
+
+
+class NoEmbeddings:
+    """A provider that is never asked, because no query is answered here."""
+
+    def embed_texts(self, texts: Sequence[str]) -> Sequence[Sequence[float]]:
+        """Refuse the call, naming how many texts were asked about."""
+        raise AssertionError(f"no vector should be needed for {len(texts)} text(s)")
+
+
+RECALL_SCOPE: Final[PrincipalScope] = PrincipalScope(
+    client_id=UNASSIGNED_CLIENT_ID,
+    agent_cli=TOOL,
+    machine_id=MACHINE,
+    retention=RECALL_RETENTION,
+)
+
+
+def build_recall_engine(*, disabled: bool = False) -> RecallEngine:
+    """A recall engine whose clock is stated and whose store is never reached."""
+    store = MemoryStore(
+        connect_with=RefusedConnections().open,
+        statement_timeout_ms=TIMEOUT_MS,
+    )
+    return RecallEngine(
+        store,
+        NoEmbeddings(),
+        recall_floor=RECALL_FLOOR,
+        clock=lambda: RECALL_MOMENT,
+        redaction=RedactionSettings(disabled=disabled),
+    )
+
+
+def recall_event_for(
+    engine: RecallEngine,
+    appended: Appended,
+    query_text: str,
+) -> Event:
+    """The one Event the recall settlement appended for one query text."""
+    engine._append_recall_event(query_text, (), 1, 0, RECALL_SCOPE, SESSION_UNDER_TEST)
+    assert len(appended.requests) == 1
+    return appended.requests[0].event
+
+
+def test_the_recall_event_carries_the_query_text_redacted_and_says_it_redacted_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requirement 4.1: the query text goes through the Redactor before the write.
+
+    The query text is what a person typed, so it is the one place in this system a
+    secret arrives as ordinary prose. The Ledger is append-only and no role holds
+    `UPDATE`, so the write is the last moment redaction can happen at all: text that
+    lands here leaves only by an erasure or by expiry.
+    """
+    appended = Appended()
+    monkeypatch.setattr(recall, "append", appended.take)
+
+    event = recall_event_for(build_recall_engine(), appended, f"why did {SHAPED_SPAN} fail")
+
+    assert event.payload["query_text"] == f"why did {REDACTED_SPAN} fail"
+    assert SHAPED_TAIL not in json.dumps(event.payload)
+    assert event.redacted is True
+
+
+def test_a_query_text_the_redactor_left_alone_is_not_flagged_as_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flag reports what the Redactor did, so it is neither hardcoded value.
+
+    Paired with the example above rather than standing alone: one query is changed
+    and flagged, one is unchanged and unflagged, and no single hardcoded flag
+    satisfies both.
+    """
+    appended = Appended()
+    monkeypatch.setattr(recall, "append", appended.take)
+    plain = "how did the migration step fail last time"
+
+    event = recall_event_for(build_recall_engine(), appended, plain)
+
+    assert event.payload["query_text"] == plain
+    assert event.redacted is False
+
+
+def test_the_recall_path_records_that_redaction_was_disabled_and_names_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+    recorded: Recorded,
+) -> None:
+    """Requirement 4.6, on the path that writes a query text into the Ledger.
+
+    With redaction off the text passes through and the flag stays false, which is
+    honest. What must not also happen is silence: the Redactor reaches no telemetry
+    surface of its own, so the record naming the Session is written here.
+    """
+    appended = Appended()
+    monkeypatch.setattr(recall, "append", appended.take)
+
+    event = recall_event_for(
+        build_recall_engine(disabled=True), appended, f"why did {SHAPED_SPAN} fail"
+    )
+
+    assert event.payload["query_text"] == f"why did {SHAPED_SPAN} fail"
+    assert event.redacted is False
+    written = recorded.rendered()
+    assert REDACTION_DISABLED_RECORD in written
+    assert str(SESSION_UNDER_TEST) in written
+
+
+# ---------------------------------------------------------------------------
+# The adapter Event, and the record redaction being off owes
+# ---------------------------------------------------------------------------
+
+
+def build_capture_context(*, disabled: bool) -> CaptureContext:
+    """The context the five adapters build Events against, with redaction stated."""
+    return CaptureContext(
+        session_id=SESSION_UNDER_TEST,
+        client=UNASSIGNED_CLIENT,
+        machine_id=MACHINE,
+        agent_cli=TOOL,
+        clock=SystemClock(),
+        redaction=RedactionSettings(disabled=disabled),
+    )
+
+
+def test_an_adapter_event_built_with_redaction_on_is_redacted_and_owes_no_record(
+    recorded: Recorded,
+) -> None:
+    """The ordinary path: the payload and the text body are both cleaned, silently."""
+    ctx = build_capture_context(disabled=False)
+
+    built = builders.event(
+        ctx,
+        EventCategory.TOOL_CALL,
+        {"command": f"deploy --header {SHAPED_SPAN}"},
+        text_body=f"the response carried {SHAPED_SPAN}",
+    )
+
+    assert SHAPED_TAIL not in json.dumps(built.payload)
+    assert built.text_body is not None
+    assert SHAPED_TAIL not in built.text_body
+    assert built.redacted is True
+    assert REDACTION_DISABLED_RECORD not in recorded.rendered()
+
+
+def test_an_adapter_event_built_with_redaction_off_records_that_it_was_off(
+    recorded: Recorded,
+) -> None:
+    """Requirement 4.6 on the primary capture path, for all five adapters at once.
+
+    Every Event any adapter builds passes through this one constructor, so the
+    record is owed here or nowhere. Before, the Redactor's warning was returned and
+    dropped, and five adapters transmitted unredacted payloads and text bodies with
+    nothing anywhere saying redaction had been switched off.
+    """
+    ctx = build_capture_context(disabled=True)
+
+    built = builders.event(
+        ctx,
+        EventCategory.TOOL_CALL,
+        {"command": f"deploy --header {SHAPED_SPAN}"},
+        text_body=f"the response carried {SHAPED_SPAN}",
+    )
+
+    assert SHAPED_TAIL in json.dumps(built.payload)
+    assert built.redacted is False
+    written = recorded.rendered()
+    assert REDACTION_DISABLED_RECORD in written
+    assert str(SESSION_UNDER_TEST) in written
+
+
+def test_one_record_is_written_per_event_however_many_values_the_payload_holds(
+    recorded: Recorded,
+) -> None:
+    """Requirement 1.8: once per Event, not once per value the Redactor would replace.
+
+    A hook payload can hold a whole file. A record per redactable value would turn a
+    large payload into a flood of identical records on a path with a latency budget,
+    so the emission sits where the payload is redacted rather than inside the walk.
+    """
+    ctx = build_capture_context(disabled=True)
+    payload: JsonObject = {
+        f"header_{index}": f"{SHAPED_SPAN}-{index}" for index in range(FLOOD_KEYS)
+    }
+
+    builders.event(ctx, EventCategory.TOOL_CALL, payload, text_body=SHAPED_SPAN)
+
+    assert recorded.rendered().count(REDACTION_DISABLED_RECORD) == 1
+
+
+def test_the_record_cannot_become_the_way_a_hook_fails_its_host_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requirement 1.7: a telemetry surface that refuses does not reach the adapter.
+
+    The warning exists to describe a degraded state. If reaching for it could raise,
+    the warning would itself become a failure mode of the capture hook, which is the
+    one thing the hook is never allowed to have.
+    """
+    ctx = build_capture_context(disabled=True)
+
+    def refuse(*_args: object, **_fields: object) -> None:
+        raise RuntimeError("the telemetry surface could not be reached")
+
+    monkeypatch.setattr("molt.telemetry.log", refuse)
+
+    built = builders.event(ctx, EventCategory.TOOL_CALL, {"command": SHAPED_SPAN})
+
+    assert built.session_id == SESSION_UNDER_TEST
+    assert built.redacted is False

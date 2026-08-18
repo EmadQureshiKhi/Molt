@@ -38,11 +38,17 @@ control-plane command are all injected stubs, so a dry run costs a schema and a
 handful of rows rather than a model call. The stub providers record their calls,
 which is how the residue verb's promise to adjudicate nothing is observable.
 
-The example budget is deliberately small. Each example applies no migration but
-does place a corpus and perform a full pass over it against a live instance, so
-the cost per example is a round trip per placed row plus one pass, and the value
-of a hundred examples over twenty-five here is small: the corpus varies in how
-many rows each table holds rather than in which branch of the pass is taken.
+The example budget is the hundred the plan states, and what pays for it is the
+namespace reset each example opens with rather than a narrower generator. Both
+verbs read across the whole fleet — the sweep's statements are set-based over the
+content tables and the residue walk ranks neighbours over every Embedding in the
+schema — and each of the three purity readings aggregates all seven content tables
+whole. Kept between examples, the corpus of every earlier example is work the last
+example pays for, so the cost of an example grew with its position and a hundred of
+them would cost far more than four times twenty-five. Emptied first, an example
+costs a migration-free placement of at most a dozen rows, one dry run, one residue
+walk, and three seven-table readings, whatever its position in the run. No bound of
+the generator moved and no health check was suppressed to reach the figure.
 """
 
 from __future__ import annotations
@@ -75,7 +81,7 @@ pytestmark = pytest.mark.integration
 
 # How many examples the property runs, and the bounds of one placed corpus. The
 # reasoning behind the budget is in the module docstring.
-MAX_EXAMPLES: Final[int] = 25
+MAX_EXAMPLES: Final[int] = 100
 MIN_SOLE_ARTIFACTS: Final[int] = 1
 MAX_SOLE_ARTIFACTS: Final[int] = 2
 MIN_EVENTS: Final[int] = 0
@@ -176,6 +182,52 @@ CONTENT_TABLES: Final[tuple[tuple[str, str], ...]] = (
     ("client_binding", DIGEST_CLIENT_BINDING),
     ("embedding", DIGEST_EMBEDDING),
     ("working_memory", DIGEST_WORKING_MEMORY),
+)
+
+# How one example's namespace is emptied before the next one places its corpus.
+#
+# Deletions rather than one cascading truncation, and the difference is the whole
+# reason this suite is runnable. A truncation on this platform is a schema change: it
+# swaps in a fresh table descriptor rather than removing rows, and a cascading one does
+# that for every table descending from the tenant table, which after the protection
+# migration is most of the schema. Schema changes are serialised through the cluster's
+# own job machinery, so a hundred examples became thousands of queued descriptor swaps
+# and the module stopped making progress — measured at seven seconds of processor time
+# across thirteen minutes of waiting, which is the signature of queueing rather than
+# work. A delete is an ordinary data write against the same rows, so it takes the
+# transaction path every other statement in this suite takes.
+#
+# The order is the one the surviving references permit, and it is the same order the
+# erasure engine's own disposition phase fixes: dependents before the rows they hang
+# off, evidence children before the run they belong to, and the tenant row last. Every
+# statement is unconditional, because emptying the namespace is the point.
+RESET_STATEMENTS: Final[tuple[str, ...]] = (
+    "DELETE FROM procedure_confidence_change WHERE true",
+    "DELETE FROM procedure_outcome WHERE true",
+    "DELETE FROM procedure_retrieval WHERE true",
+    "DELETE FROM working_memory WHERE true",
+    "DELETE FROM embedding WHERE true",
+    "DELETE FROM lineage_edge WHERE true",
+    "DELETE FROM client_binding WHERE true",
+    "DELETE FROM disposition WHERE true",
+    "DELETE FROM erasure_candidate WHERE true",
+    "DELETE FROM residue_candidate WHERE true",
+    "DELETE FROM run_session WHERE true",
+    "DELETE FROM backup_record WHERE true",
+    "DELETE FROM audit_log_snapshot WHERE true",
+    "DELETE FROM erasure_certificate WHERE true",
+    "DELETE FROM erasure_run WHERE true",
+    "DELETE FROM erasure_request WHERE true",
+    "DELETE FROM erasure_lease WHERE true",
+    "DELETE FROM checkpoint_session WHERE true",
+    "DELETE FROM ledger_checkpoint WHERE true",
+    "DELETE FROM approval_queue WHERE true",
+    "DELETE FROM policy_match WHERE true",
+    "DELETE FROM derived_artifact WHERE true",
+    "DELETE FROM ledger WHERE true",
+    "DELETE FROM session WHERE true",
+    "DELETE FROM policy_rule WHERE true",
+    "DELETE FROM client WHERE true",
 )
 
 # The run-scoped evidence a dry run is asserted to write, and the residue rows
@@ -451,6 +503,25 @@ class Cluster:
             taken[table] = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
         return taken
 
+    def reset(self) -> None:
+        """Empty the namespace, so every example starts from the same state.
+
+        This is what holds the per-example cost flat as the budget rises. Both verbs
+        under test read across the whole fleet: the sweep's own statements are
+        set-based over the content tables, and the residue walk ranks neighbours over
+        every Embedding in the schema. With the namespace kept, an example's cost grows
+        with everything every earlier example placed, and the seven digest readings
+        grow with it too, since each aggregates a whole table. Emptying it first makes
+        the work of the last example the work of the first.
+
+        The emptying is a sequence of deletes rather than one cascading truncation, for
+        the reason stated where the statements are declared: a truncation is a schema
+        change on this platform, and a hundred of them serialise into a queue that
+        starves the property of the cluster it is asserting against.
+        """
+        for statement in RESET_STATEMENTS:
+            self.send(statement)
+
     # -- placed rows ------------------------------------------------------
 
     def client(self, marker: str) -> UUID:
@@ -675,15 +746,16 @@ def differing(before: dict[str, str], after: dict[str, str]) -> tuple[str, ...]:
     return tuple(table for table, _ in CONTENT_TABLES if before[table] != after[table])
 
 
-# Feature: molt, Property 19: For any corpus and any Client, a dry-run Erasure_Run
-# and a residue-verb invocation each leave every memory-content table byte-identical
-# to what it was before, while the dry run still writes its run-scoped evidence and
-# the residue verb writes nothing at all.
+# Feature: molt, Property 19: For any memory graph, a dry-run Erasure_Run and a
+# `residue` verb invocation each leave every Artifact row, Embedding row, Lineage_Edge,
+# and Client_Binding unchanged, verified by comparing a digest computed over all
+# memory-content tables before and after.
 @settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(corpus=corpora())
 def test_a_dry_run_and_the_residue_verb_leave_every_content_table_identical(
     cluster: Cluster, corpus: Corpus
 ) -> None:
+    cluster.reset()
     placed = cluster.place(corpus)
     text = StubTextProvider(answer=redacted_body())
     before = cluster.digests()

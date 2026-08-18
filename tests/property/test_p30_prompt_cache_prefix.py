@@ -258,7 +258,12 @@ def record(case: CandidateSet, *, prefix_bytes: int, floor: int) -> None:
 # query Artifact, with arbitrary candidate excerpts, the serialised Stable_Prefix
 # is byte-identical across every candidate in the set and each prompt's
 # Cache_Boundary falls exactly at the end of that Stable_Prefix.
-@settings(max_examples=MAX_EXAMPLES)
+# No per-example deadline, as everywhere else in this suite. The prefix this module
+# asserts on is built from drawn text that may be long, so an example's duration tracks
+# the size of what was drawn and the load on the machine rather than the property, and
+# under parallel execution that timing variance failed the module on a property that
+# held. Latency bounds live in the performance suite.
+@settings(max_examples=MAX_EXAMPLES, deadline=None)
 @given(case=candidate_sets())
 def test_one_prefix_per_query_artifact_with_the_boundary_at_its_end(case: CandidateSet) -> None:
     surface = configuration()

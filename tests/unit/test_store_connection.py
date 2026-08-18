@@ -15,6 +15,7 @@ and closing the store closes what it holds and refuses further leases.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import Final, Protocol
 
 import pytest
@@ -25,12 +26,16 @@ from molt.errors import StoreError
 from molt.store import (
     DEFAULT_MAX_CONNECTIONS,
     DEFAULT_STATEMENT_TIMEOUT_MS,
+    PLATFORM_AUTHORITY,
     REQUIRED_SSL_MODE,
+    ROOT_AUTHORITY_PARAMETER,
     SSL_MODE_PARAMETER,
     STATEMENT_TIMEOUT_STATEMENT,
     Connection,
     MemoryStore,
     require_verified_tls,
+    resolved_platform_authority,
+    root_authority_of,
     ssl_mode_of,
 )
 from molt.store.retry import BEGIN_STATEMENT, COMMIT_STATEMENT, SERIALIZABLE_STATEMENT
@@ -200,16 +205,85 @@ def test_a_connection_string_naming_no_mode_gains_full_verification() -> None:
     assert required.startswith(CLUSTER_URI)
 
 
-def test_a_connection_string_already_verifying_fully_is_unchanged() -> None:
+def test_a_connection_string_already_verifying_fully_keeps_its_mode_and_gains_an_authority() -> (
+    None
+):
+    """Verification already required is left required, and the authority is still settled.
+
+    This case previously asserted the string came back untouched, which described a
+    connection that could not be made: full verification with no authority set sends
+    the client looking for an authority file under the calling user's home directory,
+    and no deployed runtime holds one. So the mode is asserted to be preserved rather
+    than the string, and the authority is asserted to be present.
+    """
     dsn = f"{CLUSTER_URI}?{SSL_MODE_PARAMETER}={REQUIRED_SSL_MODE}"
 
-    assert require_verified_tls(dsn, source_name=DSN_PARAMETER) == dsn
+    required = require_verified_tls(dsn, source_name=DSN_PARAMETER)
+
+    assert ssl_mode_of(required) == REQUIRED_SSL_MODE
+    assert root_authority_of(required) == resolved_platform_authority()
 
 
-def test_the_keyword_form_gains_full_verification_too() -> None:
+def test_an_authority_the_operator_named_is_left_alone() -> None:
+    """An explicit trust anchor is a decision this module was not asked to make.
+
+    Resolving the platform keyword is a service; replacing a path an operator wrote is
+    an override. A deployment pinning its own authority set — a private cluster with a
+    private issuer — must keep it, or this module would silently widen what that
+    deployment trusts.
+    """
+    own = "/own/roots.pem"
+    dsn = f"{CLUSTER_URI}?{SSL_MODE_PARAMETER}={REQUIRED_SSL_MODE}&{ROOT_AUTHORITY_PARAMETER}={own}"
+
+    required = require_verified_tls(dsn, source_name=DSN_PARAMETER)
+
+    assert root_authority_of(required) == own
+
+
+def test_the_keyword_form_gains_full_verification_and_an_authority_too() -> None:
     required = require_verified_tls("host=cluster.example port=26257", source_name=DSN_PARAMETER)
 
-    assert required == f"host=cluster.example port=26257 {SSL_MODE_PARAMETER}={REQUIRED_SSL_MODE}"
+    assert ssl_mode_of(required) == REQUIRED_SSL_MODE
+    assert root_authority_of(required) == resolved_platform_authority()
+    assert required.startswith("host=cluster.example port=26257 ")
+
+
+def test_the_platform_keyword_is_resolved_to_a_bundle_this_process_can_see() -> None:
+    """The substitution that makes the portable declaration actually connect.
+
+    The keyword is the portable way to name the platform's own roots, but whether it
+    resolves depends on how the driver's bundled cryptography library was built rather
+    than on the platform running it — a string carrying the keyword connected on one
+    machine and was refused on another. Resolving it here, in the process about to
+    connect, is what makes the composing step's portable declaration usable.
+    """
+    dsn = (
+        f"{CLUSTER_URI}?{SSL_MODE_PARAMETER}={REQUIRED_SSL_MODE}"
+        f"&{ROOT_AUTHORITY_PARAMETER}={PLATFORM_AUTHORITY}"
+    )
+
+    required = require_verified_tls(dsn, source_name=DSN_PARAMETER)
+    resolved = root_authority_of(required)
+
+    assert resolved == resolved_platform_authority()
+    assert required.count(ROOT_AUTHORITY_PARAMETER) == 1, (
+        "the authority was added alongside the keyword rather than replacing it, so "
+        "which value applies is left to the driver"
+    )
+    if resolved != PLATFORM_AUTHORITY:
+        assert Path(resolved or "").is_file(), (
+            "the resolved authority names no file, so this platform was reported to "
+            "hold a bundle it does not have"
+        )
+
+
+def test_no_bundle_present_leaves_the_portable_keyword_rather_than_a_missing_path() -> None:
+    """With no bundle to find, the keyword stands rather than a path that names nothing.
+
+    Naming a file that is absent would turn a question the driver could still answer
+    into a certain refusal, so the fallback is the declaration rather than a guess.
+    """
+    assert resolved_platform_authority(bundles=()) == PLATFORM_AUTHORITY
 
 
 def test_a_weaker_mode_is_refused_naming_the_source_and_the_mode() -> None:

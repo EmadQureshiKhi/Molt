@@ -185,7 +185,11 @@ def _assert_round_trip(original: Event) -> None:
 # arbitrary JSON-compatible payload, deserialising the canonical serialisation of
 # that Event yields an equivalent Event, preserving timezone, microsecond
 # precision, optional-field absence, and payload structure.
-@settings(max_examples=100)
+# No per-example deadline, as everywhere else in this suite: a wall-clock deadline
+# fails an example for the load on the machine rather than for the property, which
+# under parallel execution reports contention as a correctness failure. Latency
+# bounds are stated deliberately in the performance suite.
+@settings(max_examples=100, deadline=None)
 @given(original=events())
 def test_event_round_trip(original: Event) -> None:
     offset = original.occurred_at.utcoffset()

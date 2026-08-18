@@ -551,11 +551,13 @@ def schema_name(fresh_schema: DriverConnection) -> str:
 # ---------------------------------------------------------------------------
 
 
-# Feature: molt, Property 37: For any memory graph crossed with any working state,
-# the same erasure run with the working rows present and with them absent produces
-# the same certificate and the same verification results but for one aggregate
-# count, no evidence record references a working row, and every working row the
-# erased Client held is removed with no Disposition of its own.
+# Feature: molt, Property 37: For any memory graph paired with arbitrary Working_Memory
+# rows across the same Clients, and any deletion of those Working_Memory rows, every
+# Erasure_Certificate field and every Verification_Query result is identical with and
+# without the Working_Memory rows present, no Lineage_Edge, Client_Binding, Disposition
+# record, or Ledger_Checkpoint references a Working_Memory row, and an Erasure_Run for a
+# Client removes every Working_Memory row carrying that Client identifier while
+# recording one aggregate count and no per-row Disposition.
 @settings(
     max_examples=MAX_EXAMPLES,
     deadline=None,
