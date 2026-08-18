@@ -16,7 +16,10 @@ matched by name against a fixed template set declared here, and what is sent to
 the cluster is this module's own statement literal for that name with the
 certificate's parameters bound. A hostile certificate therefore cannot ask the
 verifier to run a statement of its choosing, and no value from the certificate
-ever reaches statement text.
+ever reaches statement text. The expectation each query is judged against and the
+set of queries a certificate owes are both properties of that template set rather
+than fields of the document, so an issuer can neither weaken the completeness
+check nor leave it out.
 
 **The reader role is a structural guarantee rather than a discipline.** The role
 is checked before any query runs, both as the label the configuration resolved and
@@ -97,10 +100,12 @@ __all__ = [
     "PREFIX_KEY",
     "QUERY_TEMPLATES",
     "QUERY_TEMPLATE_UNKNOWN",
+    "READER_MEMBERSHIP_QUERY",
     "READER_ROLE_NAMES",
     "REDACTION_DIGEST_MISMATCH",
     "SIGNATURE_INVALID",
     "SUPPORTED_ALGORITHM",
+    "VERIFICATION_QUERY_MISSING",
     "CertificateLocation",
     "CertificateSettings",
     "ChainOutcome",
@@ -150,6 +155,7 @@ EXIT_FAILED: Final[int] = 1
 SIGNATURE_INVALID: Final[str] = "signature_invalid"
 ERASURE_INCOMPLETE: Final[str] = "erasure_incomplete"
 QUERY_TEMPLATE_UNKNOWN: Final[str] = "query_template_unknown"
+VERIFICATION_QUERY_MISSING: Final[str] = "verification_query_missing"
 COUNT_DISAGREEMENT: Final[str] = "count_disagreement"
 CHAIN_MISMATCH: Final[str] = "chain_mismatch"
 CHAIN_TIP_MISMATCH: Final[str] = "chain_tip_mismatch"
@@ -166,6 +172,7 @@ CHECKPOINT_EXPLAINED_NOTE: Final[str] = "checkpoint_disagreement_explained"
 CHECKPOINT_SUCCESSION_NOTE: Final[str] = "checkpoint_is_not_the_latest_before_run"
 DERIVATION_NOTE: Final[str] = "recorded_count_derivation"
 SESSION_DELETED_NOTE: Final[str] = "session_deleted_by_this_run"
+SESSION_TIP_ABSENT_NOTE: Final[str] = "session_tip_not_recorded"
 
 # The subjects a failed check names, where the subject is a position in the
 # document rather than an identifier of a row.
@@ -180,6 +187,7 @@ DERIVED_MECHANISM: Final[str] = "ledger_and_dispositions"
 OUTSIDE_HORIZON_REASON: Final[str] = "outside_gc_horizon"
 UNPROBED_HORIZON_REASON: Final[str] = "gc_horizon_unprobed"
 HORIZON_REFUSED_REASON: Final[str] = "historical_read_refused"
+INCOMPLETE_RUN_REASON: Final[str] = "run_records_no_after_instant"
 
 # The one signing algorithm the delivered key uses. An envelope naming anything
 # else is reported as an invalid signature rather than verified by guesswork.
@@ -208,6 +216,32 @@ _SURGICAL_REDACTION: Final[str] = "surgical_redaction"
 # The role the connection is authenticated as, asked of the cluster rather than
 # assumed from the configuration.
 CURRENT_ROLE_QUERY: Final[str] = "SELECT current_user"
+
+# Whether the connected login carries the read-only role, asked of the cluster as a
+# privilege question rather than settled by comparing names.
+#
+# A deployment does not log in as a role. It provisions a login per component and grants
+# that login the role its privileges were written for, so the connected user is a member of
+# the read-only role and is not named the same as it. Comparing `current_user` against the
+# role's own spellings therefore refused every connection a deployment can actually make:
+# certificate verification could not succeed against the deployed cluster at all, which is
+# the one claim in this system that is meant to be checkable by somebody who does not trust
+# the party that signed. It succeeded locally, where the suites connect as an administrator
+# and the label was set by hand.
+#
+# Membership is the right question in any case. What the guarantee rests on is the
+# privileges the connection holds, and those come from the role however the login is spelled;
+# a name is a claim and a membership is a privilege. This is the same predicate the schema's
+# own column guards are written with, so the two cannot come to disagree about what holding a
+# role means.
+READER_MEMBERSHIP_QUERY: Final[str] = "SELECT pg_has_role(current_user, %s, %s)"
+
+# What membership is asked for. `MEMBER` is satisfied by holding the role whether or not the
+# session has assumed it, which is what a login granted the role at provisioning time has.
+_MEMBERSHIP: Final[str] = "MEMBER"
+
+# The role a verifying connection must carry, in the spelling the migrations create it under.
+_READER_ROLE: Final[str] = "molt_reader"
 
 # The executable form of the two Verification_Query templates. The certificate's
 # own text is validated against the documented form below; what is sent is this.
@@ -256,6 +290,12 @@ SELECT a.id, a.content_digest FROM derived_artifact AS a WHERE a.id = ANY (%s::U
 # ---------------------------------------------------------------------------
 
 
+# The expectation every template of the fixed set declares, held here rather than
+# read from the document, because a certificate that chose its own expectation would
+# choose whether the completeness check was made at all.
+EXPECTATION_EMPTY: Final[str] = "empty"
+
+
 @dataclass(frozen=True, slots=True)
 class QueryTemplate:
     """One admitted Verification_Query: its documented text and what is run for it.
@@ -264,12 +304,23 @@ class QueryTemplate:
     positional placeholders of the document rather than of the driver. The
     statement is this module's own literal. Keeping them apart is the whole point:
     the certificate's text is evidence to be checked, not code to be run.
+
+    Attributes:
+        expectation: What the result set must be for this template to be satisfied.
+            It is the template's fixed property rather than the document's field, so
+            an issuer cannot weaken the one check a hostile reviewer relies on by
+            declaring a laxer expectation beside the query.
+        obligatory: Whether a certificate must carry this template. An obligatory
+            template that no entry presents is a check that was never made, which is
+            reported by name rather than passed over in silence.
     """
 
     name: str
     documented_sql: str
     statement: str
     parameter_count: int
+    expectation: str = EXPECTATION_EMPTY
+    obligatory: bool = True
 
 
 QUERY_TEMPLATES: Final[Mapping[str, QueryTemplate]] = {
@@ -289,6 +340,12 @@ QUERY_TEMPLATES: Final[Mapping[str, QueryTemplate]] = {
         parameter_count=1,
     ),
 }
+
+# The templates a certificate owes. Derived from the registry rather than restated,
+# so the set of obligatory checks and the set of admitted templates cannot drift.
+OBLIGATORY_TEMPLATE_NAMES: Final[tuple[str, ...]] = tuple(
+    name for name, template in QUERY_TEMPLATES.items() if template.obligatory
+)
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +387,6 @@ NAME_FIELD: Final[str] = "name"
 SQL_FIELD: Final[str] = "sql"
 PARAMS_FIELD: Final[str] = "params"
 EXPECTATION_FIELD: Final[str] = "expectation"
-EXPECTATION_EMPTY: Final[str] = "empty"
 
 CHECKPOINT_KEY: Final[str] = "ledger_checkpoint"
 CHECKPOINT_ID_FIELD: Final[str] = "checkpoint_id"
@@ -804,21 +860,55 @@ def require_reader_role(store: MemoryStore) -> str:
     role is a privilege. This makes the no-mutation guarantee structural: a
     verification cannot write, whatever the code that follows attempts, because the
     role it runs as holds no privilege to.
+
+    Neither half is satisfied by silence. An unnamed label and a connection that
+    reports no role are stores that prove nothing about their privileges, and
+    admitting them would make the guarantee a default rather than a check: the
+    refusal is what a reviewer is relying on when the label is missing precisely
+    because nobody set it. Every path that verifies opens its store under the
+    read-only role by name, so there is no caller for whom nothing named is the
+    legitimate state.
+
+    The cluster's half is asked as a membership question rather than by comparing the
+    connected user's name against the role's. A deployment logs in as a component's own
+    login and grants it the role, so the connected user carries the read-only role without
+    being named it, and a name comparison refused every connection a deployment can make.
+    A login that *is* the role satisfies membership too, so nothing that used to pass now
+    fails.
     """
     label = store.role.strip().lower()
-    if label and label not in READER_ROLE_NAMES:
+    if label not in READER_ROLE_NAMES:
         raise VerificationFailedError(
             "certificate verification runs as the read-only role, and the configured "
-            "role is not that role, so nothing was read"
+            "role does not name that role, so nothing was read"
         )
     rows = _read_rows(store, CURRENT_ROLE_QUERY, ())
     reported = "" if not rows else str(rows[0][0]).strip().lower()
-    if reported and reported not in READER_ROLE_NAMES:
+    if not reported:
         raise VerificationFailedError(
-            "the connection is authenticated as a role that is not the read-only role, "
-            "so verification would not carry the no-mutation guarantee it claims"
+            "the connection reports no role at all, so verification would not carry the "
+            "no-mutation guarantee it claims"
         )
-    return reported or label
+    if reported not in READER_ROLE_NAMES and not _carries_reader_role(store):
+        raise VerificationFailedError(
+            f"the connection is authenticated as {reported}, which neither is nor holds "
+            "the read-only role, so verification would not carry the no-mutation "
+            "guarantee it claims"
+        )
+    return reported
+
+
+def _carries_reader_role(store: MemoryStore) -> bool:
+    """Whether the connected login holds the read-only role, as the cluster reports it.
+
+    A cluster that cannot answer the question is treated as answering no. The refusal is
+    the guarantee, so an unanswerable membership check must not become an admission.
+    """
+    try:
+        rows = _read_rows(store, READER_MEMBERSHIP_QUERY, (_READER_ROLE, _MEMBERSHIP))
+    except StoreError:
+        return False
+    return bool(rows) and rows[0][0] is True
 
 
 # ---------------------------------------------------------------------------
@@ -847,12 +937,30 @@ def _check_queries(
     store: MemoryStore,
     payload: Mapping[str, CanonicalValue],
 ) -> tuple[list[QueryOutcome], list[FailedCheck]]:
-    """Run every embedded query through its template and report each row count."""
+    """Run every obligatory query through its template and report each row count.
+
+    Two things about this check belong to the verifier rather than to the document.
+
+    The expectation applied is the template's own, taken from the registry above. A
+    certificate declaring a laxer expectation beside a query would otherwise decide
+    whether the erasure-completeness check was made, which is the one check a
+    hostile reviewer relies on. A declared expectation that disagrees with the
+    template is a query that is not the template it names, so it is reported under
+    the same name as any other departure from the fixed set, and it is a failed
+    check rather than a note because a note would leave the outcome `verified` and
+    the divergence is exactly the lever an issuer would reach for.
+
+    Presence is required rather than assumed. Every template the registry declares
+    obligatory must be presented by some entry; one that is not is reported by the
+    name of the missing query, because a certificate carrying no queries at all
+    would otherwise report `verified` with this check never performed.
+    """
     outcomes: list[QueryOutcome] = []
     failures: list[FailedCheck] = []
+    presented: set[str] = set()
     for entry in _sequence(payload, QUERIES_KEY):
         name = _text(entry, NAME_FIELD)
-        expectation = _text(entry, EXPECTATION_FIELD)
+        declared = _text(entry, EXPECTATION_FIELD)
         template = QUERY_TEMPLATES.get(name)
         parameters = _parameters(entry)
         if template is None or _normalised(_text(entry, SQL_FIELD)) != _normalised(
@@ -863,13 +971,16 @@ def _check_queries(
         if len(parameters) != template.parameter_count:
             failures.append(FailedCheck(QUERY_TEMPLATE_UNKNOWN, name))
             continue
+        presented.add(name)
+        if declared != template.expectation:
+            failures.append(FailedCheck(QUERY_TEMPLATE_UNKNOWN, name, (declared,)))
         rows = _read_rows(store, template.statement, parameters)
         identifiers = tuple(str(row[0]) for row in rows if row)
-        satisfied = not (expectation == EXPECTATION_EMPTY and rows)
+        satisfied = not (template.expectation == EXPECTATION_EMPTY and rows)
         outcomes.append(
             QueryOutcome(
                 name=name,
-                expectation=expectation,
+                expectation=template.expectation,
                 row_count=len(rows),
                 identifiers=identifiers,
                 satisfied=satisfied,
@@ -877,6 +988,11 @@ def _check_queries(
         )
         if not satisfied:
             failures.append(FailedCheck(ERASURE_INCOMPLETE, name, identifiers))
+    failures.extend(
+        FailedCheck(VERIFICATION_QUERY_MISSING, missing)
+        for missing in OBLIGATORY_TEMPLATE_NAMES
+        if missing not in presented
+    )
     return outcomes, failures
 
 
@@ -922,7 +1038,7 @@ def _check_counts(
         store,
         client_id=client_id,
         t_before=_moment(run, T_BEFORE_FIELD),
-        t_after=_moment(run, T_AFTER_FIELD),
+        t_after=_optional_moment(run, T_AFTER_FIELD),
         derived=comparison,
         now=now,
     )
@@ -942,7 +1058,7 @@ def _corroborate(
     *,
     client_id: UUID,
     t_before: datetime,
-    t_after: datetime,
+    t_after: datetime | None,
     derived: CountComparison,
     now: datetime,
 ) -> Corroboration:
@@ -953,7 +1069,16 @@ def _corroborate(
     horizon nobody probed, and an instant the horizon no longer covers, both end
     as an unattempted corroboration carrying its reason, which is a note rather
     than a failed check.
+
+    A run that recorded no after-instant is the same kind of outcome and is a note
+    for the same reason: the after-instant is nullable on the run because a run that
+    did not complete has none, so there is no second instant to read the count at
+    and nothing was withheld. The derived mechanism is the primary path and needs
+    neither timestamp, so both counts are still compared and a certificate for an
+    unfinished run reports rather than raising.
     """
+    if t_after is None:
+        return Corroboration(attempted=False, within_horizon=False, reason=INCOMPLETE_RUN_REASON)
     try:
         horizon = store.gc_horizon()
     except StoreError:
@@ -1019,6 +1144,15 @@ def _check_chains(
     A Session the certificate does not record as deleted is unchanged: its chain
     must re-derive from its stored rows and its tip must be the tip the certificate
     committed to.
+
+    The recorded tip is nullable on the per-Session row, so a certificate can carry
+    no tip for a Session. For a Session this run deleted that changes nothing: that
+    arm never compares tips. For a surviving Session it is a failed check rather
+    than a note, because the tip is the whole of what the certificate claims about
+    that Session's Events and a document naming none has committed to nothing that
+    could be checked. A note beside it records that the tip was absent rather than
+    different, so a reviewer reads which of the two it was, and the failure is
+    reported under the tip check rather than aborting the verification.
     """
     deleted = _hard_deleted_artifacts(payload)
     outcomes: list[ChainOutcome] = []
@@ -1026,7 +1160,7 @@ def _check_chains(
     notes: list[Note] = []
     for entry in _sequence(payload, SESSIONS_KEY):
         session_text = _text(entry, SESSION_ID_FIELD)
-        recorded_tip = _text(entry, TERMINAL_DIGEST_FIELD)
+        recorded_tip = _optional_text(entry, TERMINAL_DIGEST_FIELD)
         report = verify_chain(store, _uuid(session_text))
         was_deleted = session_text in deleted
         outcome = ChainOutcome(
@@ -1034,7 +1168,7 @@ def _check_chains(
             ok=report.ok,
             rows=report.rows,
             first_mismatch_seq=report.first_mismatch_seq,
-            recorded_tip=recorded_tip,
+            recorded_tip="" if recorded_tip is None else recorded_tip,
             verified_tip=report.terminal_digest,
             accounted_deletion=was_deleted and report.rows == 0,
         )
@@ -1051,6 +1185,9 @@ def _check_chains(
             failures.append(
                 FailedCheck(CHAIN_MISMATCH, session_text, (str(report.first_mismatch_seq),))
             )
+        elif recorded_tip is None:
+            notes.append(Note(SESSION_TIP_ABSENT_NOTE, session_text))
+            failures.append(FailedCheck(CHAIN_TIP_MISMATCH, session_text))
         elif not outcome.tip_agrees:
             failures.append(FailedCheck(CHAIN_TIP_MISMATCH, session_text))
     return outcomes, failures, notes
@@ -1316,6 +1453,16 @@ def _text(entry: Mapping[str, object], name: str) -> str:
     return value
 
 
+def _optional_text(entry: Mapping[str, object], name: str) -> str | None:
+    """One text field that the record it came from allows to be null.
+
+    An explicit null and an absent key are one answer here, because both say the
+    document carries no value at that position, and a caller decides what that means
+    for the check it is making rather than being handed an exception.
+    """
+    return None if entry.get(name) is None else _text(entry, name)
+
+
 def _count(entry: Mapping[str, CanonicalValue], name: str) -> int:
     """One required count, held as a decimal string by the canonical rules.
 
@@ -1356,6 +1503,15 @@ def _moment(entry: Mapping[str, CanonicalValue], name: str) -> datetime:
     if moment.utcoffset() is None:
         raise VerificationFailedError(f"the certificate timestamp {name} carries no offset")
     return moment
+
+
+def _optional_moment(entry: Mapping[str, CanonicalValue], name: str) -> datetime | None:
+    """One timestamp the run record allows to be null, such as an after-instant.
+
+    A malformed instant is still refused by the required reader: nullability is
+    permission to carry nothing, not permission to carry anything.
+    """
+    return None if entry.get(name) is None else _moment(entry, name)
 
 
 def _uuid(value: str) -> UUID:
