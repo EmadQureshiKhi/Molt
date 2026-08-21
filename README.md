@@ -38,7 +38,7 @@
 
 ### **https://trymolt.org**
 
-### Sign in with this credential
+### Sign in with this credential (Operator credential to be pasted during sign in)
 
 ```text
 5wfB-xHKhjm8Z77eGhxApox4TB4dMsUi
